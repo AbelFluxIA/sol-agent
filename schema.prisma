@@ -1,0 +1,70 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Cada conversa é ligada ao número de telefone (WhatsApp)
+model Conversation {
+  id        String   @id @default(cuid())
+  phone     String   @unique  // número do whatsapp ex: 5583999999999
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Dados coletados no onboarding
+  name            String?
+  arrivalDate     String?
+  departureDate   String?
+  arrivalTime     String?
+  interests       String?   // "Praia", "Gastronomia", etc
+  travelStyle     String?   // "Conforto" ou "Aventura"
+  groupType       String?   // "solo", "casal", "família com crianças", etc
+  touristProfile  String?   // resultado da classificação interna (Fase 3)
+
+  // Controle de fluxo
+  phase           Int      @default(1)  // 1=apresentação, 2=onboarding, 3=classificado, 4=gerou roteiro, 5=pós-pagamento
+  onboardingStep  Int      @default(0)  // qual das 5 perguntas estamos (0 a 5)
+  hasPaid         Boolean  @default(false)
+  freeCredits     Int      @default(0)  // créditos grátis disponíveis
+
+  // Histórico de mensagens (memória de curto prazo)
+  messages  Message[]
+
+  // Roteiros gerados
+  itineraries Itinerary[]
+}
+
+// Cada mensagem trocada na conversa
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  role    String  // "user" | "assistant" | "system"
+  content String  @db.Text
+  
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// Roteiros gerados e pagamentos
+model Itinerary {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  days          Int
+  pdfUrl        String?
+  paymentId     String?   // ID do pagamento no Abacate Pay
+  status        String    @default("pending")  // "pending" | "paid" | "generated" | "sent"
+  
+  rawItinerary  String?   @db.Text  // texto gerado pelo agente
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
