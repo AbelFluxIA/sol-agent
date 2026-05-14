@@ -25,12 +25,13 @@ export const config = {
   // Google Gemini (para gerar roteiros — usa API do Google AI Studio)
   google: {
     apiKey: required('GOOGLE_API_KEY'),
-    model: process.env.GOOGLE_MODEL || 'gemini-2.0-flash',
+    model: process.env.GOOGLE_MODEL || 'gemini-2.5-flash',
   },
 
   supabase: {
     url: required('SUPABASE_URL'),
     anonKey: required('SUPABASE_ANON_KEY'),
+    serviceKey: required('SUPABASE_SERVICE_KEY'),
   },
 
   abacatePay: {
@@ -38,7 +39,15 @@ export const config = {
     webhookSecret: process.env.ABACATEPAY_WEBHOOK_SECRET || '',
   },
 
+  // Número do WhatsApp da Sol (formato internacional sem +, ex: 5583999999999)
+  whatsappNumber: process.env.WHATSAPP_NUMBER || '',
+
   // Links de pagamento por número de dias
+  zynk: {
+    webhookUrl: process.env.ZYNK_WEBHOOK_URL || '',
+    phoneNumberId: process.env.META_PHONE_NUMBER_ID || '',
+  },
+
   paymentLinks: {
     1:  process.env.PAYMENT_LINK_1  || '',
     2:  process.env.PAYMENT_LINK_2  || '',

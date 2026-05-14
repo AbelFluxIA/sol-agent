@@ -1,20 +1,19 @@
-// src/tools/sol.tools.ts
-// Definição das tools para o OpenAI function calling
-// Quando a Sol "chama" uma dessas funções, o código executa a lógica real
-
 import OpenAI from 'openai'
 
-// Definição das tools no formato que o OpenAI espera
 export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
       name: 'gerar_roteiro_de_viagem',
       description:
-        'Gera um roteiro de viagem personalizado para o cliente. Chame esta tool SOMENTE após coletar todas as 5 informações do onboarding: nome, datas (chegada e saída), horário de chegada, interesses e estilo de viagem, e composição do grupo.',
+        'Gera um roteiro de viagem personalizado. Chame SOMENTE após coletar as 8 informações: nome, destino, datas, horário de chegada, interesses/estilo, composição do grupo, hospedagem e horário de volta.',
       parameters: {
         type: 'object',
         properties: {
+          destino: {
+            type: 'string',
+            description: 'Cidade e país/estado do destino. Ex: "João Pessoa - PB", "Lisboa - Portugal", "Paris - França", "Buenos Aires - Argentina"',
+          },
           data_chegada: {
             type: 'string',
             description: 'Data de chegada no formato YYYY-MM-DD',
@@ -29,8 +28,7 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
           },
           perfil_do_turista: {
             type: 'string',
-            description:
-              'Classificação interna do perfil. Ex: "Turista cultural, solo, foco em centros históricos, prefere conforto"',
+            description: 'Classificação interna do perfil. Ex: "Turista cultural, solo, foco em museus e história, prefere conforto"',
           },
           sozinho_ou_acompanhado: {
             type: 'string',
@@ -40,14 +38,25 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
             type: 'string',
             description: 'Nome do cliente',
           },
+          hotel_hospedagem: {
+            type: 'string',
+            description: 'Hotel ou bairro onde o cliente vai ficar. Ex: "Hotel Tambaú", "Manaíra", "não informado"',
+          },
+          horario_volta: {
+            type: 'string',
+            description: 'Horário aproximado de partida no último dia. Ex: "08:00", "14:00", "20:00". Use "não informado" se o cliente não souber.',
+          },
         },
         required: [
+          'destino',
           'data_chegada',
           'data_saida',
           'horario_chegada',
           'perfil_do_turista',
           'sozinho_ou_acompanhado',
           'nome_turista',
+          'hotel_hospedagem',
+          'horario_volta',
         ],
       },
     },
@@ -55,9 +64,18 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'consultar_meus_creditos',
+      description:
+        'Consulta o saldo de créditos grátis e estatísticas de indicações do cliente. Use quando o cliente perguntar sobre créditos, roteiros grátis, indicações feitas ou quantas pessoas usaram o link dele.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'roteiro_personalizado',
       description:
-        'Gera um roteiro com número de dias específico para um cliente que JÁ PAGOU e quer alterar o roteiro. Use SOMENTE na fase pós-pagamento.',
+        'Gera novo link de pagamento com número de dias específico. Use quando o cliente quiser mudar o número de dias — tanto ANTES de pagar (fase 4) quanto depois (fase 5).',
       parameters: {
         type: 'object',
         properties: {
@@ -73,14 +91,16 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
   },
 ]
 
-// Tipos para os argumentos das tools
 export interface GerarRoteirArgs {
+  destino: string
   data_chegada: string
   data_saida: string
   horario_chegada: string
   perfil_do_turista: string
   sozinho_ou_acompanhado: string
   nome_turista: string
+  hotel_hospedagem: string
+  horario_volta: string
 }
 
 export interface RoteiroPersonalizadoArgs {

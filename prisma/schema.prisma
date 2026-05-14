@@ -24,12 +24,20 @@ model Conversation {
   travelStyle     String?   // "Conforto" ou "Aventura"
   groupType       String?   // "solo", "casal", "família com crianças", etc
   touristProfile  String?   // resultado da classificação interna (Fase 3)
+  destination     String?   // ex: "João Pessoa - PB", "Lisboa", "Paris"
 
   // Controle de fluxo
   phase           Int      @default(1)  // 1=apresentação, 2=onboarding, 3=classificado, 4=gerou roteiro, 5=pós-pagamento
   onboardingStep  Int      @default(0)  // qual das 5 perguntas estamos (0 a 5)
   hasPaid         Boolean  @default(false)
   freeCredits     Int      @default(0)  // créditos grátis disponíveis
+
+  // Afiliação / indicação
+  referralCode    String?  @unique       // código único desta conversa para compartilhar
+  referredBy      String?               // código de quem indicou este usuário
+
+  // Sol Acompanhante
+  hasCompanion    Boolean  @default(false)  // comprou o plano de acompanhamento em tempo real
 
   // Histórico de mensagens (memória de curto prazo)
   messages  Message[]

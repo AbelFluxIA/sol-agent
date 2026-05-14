@@ -1,27 +1,126 @@
-// src/routes/index.ts
 import { Router, Request, Response } from 'express'
+import OpenAI from 'openai'
+import { toFile } from 'openai'
 import { processMessage } from '../agents/sol.agent'
 import { generateAndSendItinerary } from '../agents/sol.agent'
-import { getOrCreateConversation, updateItinerary, getLatestItinerary } from '../services/database.service'
-import { markAsRead } from '../services/whatsapp.service'
+import { getOrCreateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit } from '../services/database.service'
+import { markAsRead, downloadMedia, sendWithTyping } from '../services/whatsapp.service'
+import { addPhotoToMuralWithNarration } from '../services/mural.service'
 import { config } from '../config'
 
 const router = Router()
+const openai = new OpenAI({ apiKey: config.openai.apiKey })
 
 // ----------------------------------------------------------------
-// WEBHOOK: Meta WhatsApp API → recebe mensagens
-//
-// A Meta exige dois endpoints no mesmo path:
-//   GET  /webhook/whatsapp → verificação inicial (só feita uma vez)
-//   POST /webhook/whatsapp → recebe mensagens em tempo real
-//
-// Configure no Meta for Developers:
-//   Callback URL: https://SEU-DOMINIO.railway.app/webhook/whatsapp
-//   Verify Token: o mesmo valor de META_VERIFY_TOKEN no seu .env
-//   Subscription fields: messages
+// Buffer de mensagens — acumula por 10s antes de processar
+// Garante que mensagens quebradas chegam juntas ao agente
 // ----------------------------------------------------------------
+const messageBuffer = new Map<string, string[]>()
+const messageTimers = new Map<string, NodeJS.Timeout>()
+const BUFFER_DELAY_MS = 8_000
 
-// GET — verificação do webhook (Meta bate aqui na primeira configuração)
+function scheduleProcess(phone: string): void {
+  const existing = messageTimers.get(phone)
+  if (existing) clearTimeout(existing)
+
+  const timer = setTimeout(async () => {
+    const messages = messageBuffer.get(phone) ?? []
+    messageBuffer.delete(phone)
+    messageTimers.delete(phone)
+
+    if (messages.length === 0) return
+
+    const combined = messages.join('\n')
+    console.log(`📦 [${phone}] Processando ${messages.length} mensagem(ns) acumulada(s)`)
+
+    processMessage(phone, combined).catch(err => {
+      console.error(`❌ Erro ao processar mensagens de ${phone}:`, err)
+    })
+  }, BUFFER_DELAY_MS)
+
+  messageTimers.set(phone, timer)
+}
+
+// ----------------------------------------------------------------
+// Transcreve áudio usando Whisper
+// ----------------------------------------------------------------
+async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<string> {
+  const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'ogg'
+  const file = await toFile(buffer, `audio.${ext}`, { type: mimeType })
+  const result = await openai.audio.transcriptions.create({
+    file,
+    model: 'whisper-1',
+    language: 'pt',
+  })
+  return result.text
+}
+
+// ----------------------------------------------------------------
+// Salva foto enviada pelo cliente no Supabase Storage e no perfil
+// Se hasCompanion=true, também adiciona ao mural com narração da Sol
+// ----------------------------------------------------------------
+async function saveCustomerPhoto(phone: string, mediaId: string, hasCompanion: boolean): Promise<void> {
+  const { buffer, mimeType } = await downloadMedia(mediaId)
+  const ext = mimeType.includes('png') ? 'png' : 'jpg'
+  const fileName = `customer-photos/${phone}/${Date.now()}.${ext}`
+
+  const supabaseUrl = config.supabase?.url || process.env.SUPABASE_URL!
+  const serviceKey  = (config.supabase as any)?.serviceKey || process.env.SUPABASE_SERVICE_KEY!
+
+  // Upload para Supabase Storage
+  const uploadRes = await fetch(`${supabaseUrl}/storage/v1/object/${fileName}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${serviceKey}`,
+      'Content-Type': mimeType,
+    },
+    body: buffer,
+  })
+
+  if (!uploadRes.ok) {
+    const err = await uploadRes.text()
+    throw new Error(`Upload falhou: ${err}`)
+  }
+
+  const photoUrl = `${supabaseUrl}/storage/v1/object/public/${fileName}`
+
+  // Salva na tabela customer_photos
+  await fetch(`${supabaseUrl}/rest/v1/customer_photos`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${serviceKey}`,
+      apikey: serviceKey,
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({ phone, photo_url: photoUrl, whatsapp_media_id: mediaId }),
+  })
+
+  // Adiciona URL ao array photos do customers
+  await fetch(`${supabaseUrl}/rest/v1/rpc/append_customer_photo`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${serviceKey}`,
+      apikey: serviceKey,
+    },
+    body: JSON.stringify({ p_phone: phone, p_url: photoUrl }),
+  })
+
+  console.log(`📸 Foto salva para ${phone}: ${photoUrl}`)
+
+  // Se tem acompanhante: narração da Sol + adiciona ao mural de memórias
+  if (hasCompanion) {
+    const narration = await addPhotoToMuralWithNarration(phone, photoUrl, buffer, mimeType)
+    if (narration) {
+      await sendWithTyping(phone, narration, 1200)
+    }
+  }
+}
+
+// ----------------------------------------------------------------
+// GET /webhook/whatsapp — verificação inicial da Meta
+// ----------------------------------------------------------------
 router.get('/webhook/whatsapp', (req: Request, res: Response) => {
   const mode      = req.query['hub.mode']
   const token     = req.query['hub.verify_token']
@@ -29,56 +128,82 @@ router.get('/webhook/whatsapp', (req: Request, res: Response) => {
 
   if (mode === 'subscribe' && token === config.meta.verifyToken) {
     console.log('✅ Webhook Meta verificado com sucesso!')
-    res.status(200).send(challenge) // OBRIGATÓRIO retornar o challenge
+    res.status(200).send(challenge)
   } else {
     console.warn('⚠️ Verificação Meta falhou — token incorreto')
     res.status(403).json({ error: 'Forbidden' })
   }
 })
 
-// POST — recebe mensagens reais
+// ----------------------------------------------------------------
+// POST /webhook/whatsapp — recebe mensagens reais
+// ----------------------------------------------------------------
 router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
   try {
     const body = req.body
-
-    // Sempre responde 200 imediatamente (Meta exige resposta rápida)
     res.status(200).json({ ok: true })
 
-    // Valida estrutura mínima
     if (body?.object !== 'whatsapp_business_account') return
 
-    const entry   = body?.entry?.[0]
-    const changes = entry?.changes?.[0]
-    const value   = changes?.value
+    const value = body?.entry?.[0]?.changes?.[0]?.value
+    if (!value) return
+    if (value?.statuses) return
 
-    // Pega a primeira mensagem do payload
     const messageObj = value?.messages?.[0]
     if (!messageObj) return
 
-    // Ignora mensagens enviadas por nós (status updates)
-    if (value?.statuses) return
-
-    // Extrai dados
-    const phone     = messageObj.from                          // ex: "5583999999999"
+    const phone     = messageObj.from
     const messageId = messageObj.id
-    const text      = messageObj.text?.body                    // mensagem de texto
-    const type      = messageObj.type                         // "text", "interactive", etc
+    const type      = messageObj.type
 
-    // Por ora só processamos texto
-    if (type !== 'text' || !text) {
+    markAsRead(messageId).catch(() => {})
+
+    let text: string | null = null
+
+    if (type === 'text') {
+      text = messageObj.text?.body ?? null
+    } else if (type === 'audio') {
+      const mediaId = messageObj.audio?.id
+      if (!mediaId) return
+      console.log(`🎙️ [${phone}] Áudio recebido — transcrevendo...`)
+      try {
+        const { buffer, mimeType } = await downloadMedia(mediaId)
+        text = await transcribeAudio(buffer, mimeType)
+        console.log(`🎙️ [${phone}] Transcrição: ${text}`)
+      } catch (err) {
+        console.error(`❌ Erro ao transcrever áudio de ${phone}:`, err)
+        return
+      }
+    } else if (type === 'image') {
+      const mediaId = messageObj.image?.id
+      if (!mediaId) return
+      console.log(`📸 [${phone}] Foto recebida — salvando no perfil...`)
+      const convForPhoto = await getOrCreateConversation(phone)
+      saveCustomerPhoto(phone, mediaId, convForPhoto.hasCompanion).catch(err =>
+        console.error(`❌ Erro ao salvar foto de ${phone}:`, err)
+      )
+      return
+    } else if (type === 'location') {
+      const lat = messageObj.location?.latitude
+      const lng = messageObj.location?.longitude
+      if (!lat || !lng) return
+      console.log(`📍 [${phone}] Localização recebida: ${lat}, ${lng}`)
+      // Encaminha como mensagem de texto para o agente processar (modo acompanhante)
+      text = `[LOCALIZAÇÃO: lat=${lat}, lng=${lng}]`
+    } else {
       console.log(`⚠️ Tipo de mensagem não suportado: ${type}`)
       return
     }
 
-    console.log(`📨 [${phone}] ${text.substring(0, 60)}`)
+    if (!text?.trim()) return
 
-    // Marca como lida (ticks azuis)
-    markAsRead(messageId).catch(() => {})
+    console.log(`📨 [${phone}] ${text.substring(0, 80)}`)
 
-    // Processa em background
-    processMessage(phone, text).catch(err => {
-      console.error(`❌ Erro ao processar mensagem de ${phone}:`, err)
-    })
+    // Acumula no buffer e reinicia o timer de 10s
+    const buffer = messageBuffer.get(phone) ?? []
+    buffer.push(text)
+    messageBuffer.set(phone, buffer)
+    scheduleProcess(phone)
 
   } catch (error) {
     console.error('❌ Erro no webhook WhatsApp:', error)
@@ -86,28 +211,20 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
 })
 
 // ----------------------------------------------------------------
-// WEBHOOK: Abacate Pay → notificação de pagamento confirmado
-// URL: https://seu-servidor.railway.app/webhook/payment
-// Configure este endpoint no painel do Abacate Pay
+// POST /webhook/payment — confirmação de pagamento (Abacate Pay)
 // ----------------------------------------------------------------
 router.post('/webhook/payment', async (req: Request, res: Response) => {
   try {
     const body = req.body
-    
     console.log('💰 Webhook Abacate Pay recebido:', JSON.stringify(body, null, 2))
-    
-    // Responde 200 imediatamente
     res.status(200).json({ ok: true })
 
-    // Verifica se o pagamento foi aprovado
     const status = body?.payment?.status || body?.status
     if (status !== 'PAID' && status !== 'approved' && status !== 'paid') {
       console.log(`⚠️ Pagamento com status "${status}", ignorando`)
       return
     }
 
-    // Extrai telefone do metadata do pagamento
-    // (você precisa enviar o telefone como metadata ao criar o link no Abacate Pay)
     const phone =
       body?.payment?.metadata?.phone ||
       body?.metadata?.phone ||
@@ -122,13 +239,24 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
 
     console.log(`✅ Pagamento confirmado para ${phone} (ID: ${paymentId})`)
 
-    // Atualiza o itinerary com o ID do pagamento
     const itinerary = await getLatestItinerary(phone)
     if (itinerary) {
       await updateItinerary(itinerary.id, { status: 'paid', paymentId })
     }
 
-    // Gera e envia o roteiro
+    // Credita o referrer se este usuário foi indicado
+    const conv = await getOrCreateConversation(phone)
+    if (conv.referredBy) {
+      const referrerPhone = await getReferrerPhone(conv.referredBy)
+      if (referrerPhone) {
+        await addFreeCredit(referrerPhone)
+        const { sendWithTyping } = await import('../services/whatsapp.service')
+        sendWithTyping(referrerPhone, 'Alguém usou seu link de indicação e acabou de pagar! 🎉 Você ganhou 1 roteiro grátis — é só usar quando quiser.', 500)
+          .catch(err => console.warn('⚠️ Notificação de referral falhou:', err.message))
+        console.log(`🎁 Crédito grátis enviado para referrer ${referrerPhone}`)
+      }
+    }
+
     generateAndSendItinerary(phone).catch(err => {
       console.error(`❌ Erro ao gerar roteiro pós-pagamento para ${phone}:`, err)
     })
@@ -139,32 +267,63 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
 })
 
 // ----------------------------------------------------------------
-// Health check — para o Railway saber que o servidor está vivo
+// POST /internal/reset-session — chamado pelo Zynk ao reiniciar conversa
 // ----------------------------------------------------------------
-router.get('/health', (_req: Request, res: Response) => {
-  res.json({
-    status: 'ok',
-    service: 'Sol Agent',
-    timestamp: new Date().toISOString(),
-  })
+router.post('/internal/reset-session', async (req: Request, res: Response) => {
+  const { phone } = req.body
+  if (!phone) return res.status(400).json({ error: 'phone obrigatório' })
+
+  try {
+    // Limpa buffer em memória
+    const timer = messageTimers.get(phone)
+    if (timer) clearTimeout(timer)
+    messageTimers.delete(phone)
+    messageBuffer.delete(phone)
+
+    // Reseta conversa no banco
+    await resetConversation(phone)
+
+    console.log(`🔄 [${phone}] Sessão reiniciada pelo Zynk`)
+    res.json({ success: true })
+  } catch (err: any) {
+    console.error('Erro ao resetar sessão:', err.message)
+    res.status(500).json({ error: err.message })
+  }
 })
 
 // ----------------------------------------------------------------
-// Endpoint de teste (remova em produção)
+// GET /health
+// ----------------------------------------------------------------
+router.get('/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', service: 'Sol Agent', timestamp: new Date().toISOString() })
+})
+
+// ----------------------------------------------------------------
+// POST /test/message (remover em produção)
 // ----------------------------------------------------------------
 router.post('/test/message', async (req: Request, res: Response) => {
   const { phone, message } = req.body
   if (!phone || !message) {
     return res.status(400).json({ error: 'phone e message são obrigatórios' })
   }
-
   try {
-    // Processa sem enviar pelo WhatsApp (apenas retorna a resposta)
     await processMessage(phone, message)
     res.json({ ok: true, message: 'Mensagem processada' })
   } catch (error: any) {
     res.status(500).json({ error: error.message })
   }
+})
+
+// ----------------------------------------------------------------
+// POST /internal/generate-itinerary — dispara geração sem verificar crédito
+// ----------------------------------------------------------------
+router.post('/internal/generate-itinerary', async (req: Request, res: Response) => {
+  const { phone } = req.body
+  if (!phone) return res.status(400).json({ error: 'phone obrigatório' })
+  res.json({ ok: true, message: 'Geração iniciada' })
+  generateAndSendItinerary(phone).catch(err => {
+    console.error(`❌ Erro ao gerar roteiro manual para ${phone}:`, err)
+  })
 })
 
 export default router
