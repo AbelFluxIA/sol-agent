@@ -4,6 +4,7 @@
 
 import OpenAI from 'openai'
 import { config } from '../config'
+import { log } from '../logger'
 import { buildSolSystemPrompt } from '../prompts/sol.prompts'
 import { solTools, GerarRoteirArgs, RoteiroPersonalizadoArgs } from '../tools/sol.tools'
 
@@ -60,11 +61,11 @@ function isInjectionAttempt(msg: string): boolean {
 
 // Ponto de entrada principal — chamado quando chega mensagem do WhatsApp
 export async function processMessage(phone: string, userMessage: string): Promise<void> {
-  console.log(`📨 [${phone}] Mensagem recebida: ${userMessage.substring(0, 50)}...`)
+  log.info('mensagem recebida', { phone, data: { preview: userMessage.substring(0, 80) } })
 
   // Guardrail de primeiro nível: detecta injeção antes de qualquer processamento
   if (isInjectionAttempt(userMessage)) {
-    console.warn(`⚠️ [${phone}] Tentativa de injeção detectada: ${userMessage.substring(0, 80)}`)
+    log.warn('tentativa de injeção detectada', { phone, data: { preview: userMessage.substring(0, 80) } })
     await saveMessage(phone, 'user', userMessage)
     await sendWithTyping(phone, 'Não funciona assim comigo. O que você precisava sobre a viagem?', 800)
     return
@@ -114,7 +115,7 @@ export async function processMessage(phone: string, userMessage: string): Promis
     const toolName = toolCall.function.name
     const toolArgs = JSON.parse(toolCall.function.arguments)
 
-    console.log(`🔧 Tool chamada: ${toolName}`, toolArgs)
+    log.info('tool chamada', { phone, data: { toolName, toolArgs } })
 
     if (toolName === 'gerar_roteiro_de_viagem') {
       await handleGerarRoteiro(phone, toolArgs as GerarRoteirArgs)
@@ -129,7 +130,7 @@ export async function processMessage(phone: string, userMessage: string): Promis
   // 6. Se é resposta de texto normal
   const replyText = message?.content
   if (!replyText) {
-    console.error('❌ OpenAI retornou resposta vazia')
+    log.error('OpenAI retornou resposta vazia', new Error('empty response'), { phone })
     return
   }
 
@@ -186,7 +187,7 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs): Promise
   const paymentLink = config.paymentLinks[days]
 
   if (!paymentLink) {
-    console.error(`⚠️ Link de pagamento não configurado para ${days} dias`)
+    log.error('link de pagamento não configurado', new Error(`missing payment link for ${days} days`), { phone, data: { days } })
     await sendWithTyping(phone, 'Ops, tive um probleminha aqui. Já resolvo. 😅', 1000)
     return
   }
@@ -276,7 +277,7 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
   } = conversation
 
   if (!name || !arrivalDate || !departureDate) {
-    console.error(`❌ Dados incompletos para gerar roteiro do ${phone}`)
+    log.error('dados incompletos para gerar roteiro', new Error('missing fields'), { phone, data: { name, arrivalDate, departureDate } })
     return
   }
 
@@ -286,51 +287,71 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
   const voltaMatch = touristProfile?.match(/\|\s*horario_volta:\s*([^\|]+)/)
   const departureTime = voltaMatch ? voltaMatch[1].trim() : null
 
+  log.info('iniciando geração de roteiro', { phone, data: { dest, arrivalDate, departureDate, name } })
+
   try {
     // Avisa que está gerando
     await sendWithTyping(phone, buildGeneratingMessage(name), 500)
 
     // Busca clima e maré com base no destino
-    const { weather, marine } = await getWeatherAndMarine(arrivalDate, departureDate, dest)
+    const { weather, marine } = await log.timed(phone, 'weather/marine', () =>
+      getWeatherAndMarine(arrivalDate, departureDate, dest)
+    )
 
     // Descobre número de dias (ou usa o forçado)
-    const days = forceDays || (await classifyDays(arrivalDate, departureDate))
+    const days = forceDays || (await log.timed(phone, 'classify-days', () =>
+      classifyDays(arrivalDate, departureDate)
+    ))
 
     // Gera o texto do roteiro
-    const itineraryText = await generateItineraryText({
-      name,
-      destination: dest,
-      arrivalDate,
-      departureDate,
-      arrivalTime: arrivalTime || '12:00',
-      touristProfile: touristProfile || 'Turista geral',
-      groupType: groupType || 'solo',
-      weather,
-      marine,
-      forceDays: days,
-      departureTime,
-    })
+    const itineraryText = await log.timed(phone, 'gemini-itinerary', () =>
+      generateItineraryText({
+        name,
+        destination: dest,
+        arrivalDate,
+        departureDate,
+        arrivalTime: arrivalTime || '12:00',
+        touristProfile: touristProfile || 'Turista geral',
+        groupType: groupType || 'solo',
+        weather,
+        marine,
+        forceDays: days,
+        departureTime,
+      })
+    )
 
     // Gera o PDF com o roteiro completo
-    const { pdfUrl, shareCode } = await generatePdf({
-      travelerName: name,
-      destination: dest,
-      itineraryText,
-    })
+    const { pdfUrl, shareCode } = await log.timed(phone, 'generate-pdf', () =>
+      generatePdf({
+        travelerName: name,
+        destination: dest,
+        itineraryText,
+      })
+    )
 
-    // Envia link interativo como botão CTA (roteiro web com checkboxes)
+    // Envia link interativo (roteiro web com checkboxes)
+    // Usa try/catch próprio — falha aqui não pode matar o envio do PDF
     if (shareCode) {
       const interactiveUrl = `https://iaturismo-two.vercel.app/r/${shareCode}`
       const interactiveMsg = `Aqui está o seu roteiro interativo — marque cada atividade conforme for fazendo! ✅`
       await saveMessage(phone, 'assistant', `${interactiveMsg}\n${interactiveUrl}`)
-      await sendCtaButton(phone, interactiveMsg, 'Ver roteiro interativo 🗺️', interactiveUrl)
+      try {
+        await sendCtaButton(phone, interactiveMsg, 'Ver roteiro interativo', interactiveUrl)
+      } catch {
+        // CTA falhou (domínio não registrado no Meta) — envia como texto simples
+        await sendWithTyping(phone, `${interactiveMsg}\n\n${interactiveUrl}`, 500)
+      }
       await sleep(1500)
     }
 
     // Envia o PDF como botão CTA
     const pdfMessage = buildItinerarySentMessage()
     await saveMessage(phone, 'assistant', `${pdfMessage}\n${pdfUrl}`)
-    await sendCtaButton(phone, pdfMessage, 'Baixar PDF ☀️', pdfUrl)
+    try {
+      await sendCtaButton(phone, pdfMessage, 'Baixar PDF', pdfUrl)
+    } catch {
+      await sendWithTyping(phone, `${pdfMessage}\n\n${pdfUrl}`, 500)
+    }
 
     // Marca como pago e roteiro enviado
     await updateConversation(phone, { hasPaid: true, phase: 5 })
@@ -351,9 +372,9 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
       await sendCtaButton(phone, refBody, 'Meu link de indicação 🔗', refUrl)
     }
 
-    console.log(`✅ Roteiro enviado com sucesso para ${phone}`)
+    log.info('roteiro enviado com sucesso', { phone })
   } catch (error) {
-    console.error(`❌ Erro ao gerar roteiro para ${phone}:`, error)
+    log.error('erro ao gerar roteiro', error, { phone })
     await sendWithTyping(
       phone,
       'Ops, tive um problema técnico aqui 😅 Mas já já resolvo e te mando tudo certinho!',

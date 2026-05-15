@@ -1,6 +1,7 @@
 import axios from 'axios'
 import OpenAI from 'openai'
 import { config } from '../config'
+import { log } from '../logger'
 import { buildItinerarySystemPrompt, buildDaysClassifierPrompt } from '../prompts/sol.prompts'
 import { WeatherData, MarineData, VALID_DAYS, ValidDays } from '../types'
 import { getDaysOfWeek } from '../services/weather.service'
@@ -117,9 +118,10 @@ Gere o roteiro completo formatado para WhatsApp.
   let lastError: any
   for (const model of models) {
     for (let attempt = 1; attempt <= 3; attempt++) {
+      const start = Date.now()
       try {
         if (model !== config.google.model || attempt > 1) {
-          console.log(`🔄 Gemini usando modelo: ${model} (tentativa ${attempt}/3)`)
+          log.info('gemini modelo/tentativa', { step: 'gemini-generate', data: { model, attempt } })
         }
         const response = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.google.apiKey}`,
@@ -132,6 +134,7 @@ Gere o roteiro completo formatado para WhatsApp.
         )
         const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text
         if (!text) throw new Error('Gemini não retornou texto no roteiro')
+        log.info('gemini concluiu', { step: 'gemini-generate', durationMs: Date.now() - start, data: { model, chars: text.length } })
         return text
       } catch (err: any) {
         lastError = err
@@ -140,14 +143,15 @@ Gere o roteiro completo formatado para WhatsApp.
           || err?.code === 'ECONNRESET' || err?.code === 'ECONNABORTED'
           || err?.message?.includes('timeout')
         if (isRetryable) {
-          console.warn(`⚠️ Gemini [${model}] tentativa ${attempt}/3 falhou (${status || err?.code || 'timeout'}), aguardando 15s...`)
+          log.warn('gemini falhou, aguardando retry', { step: 'gemini-generate', durationMs: Date.now() - start, data: { model, attempt, status: status || err?.code || 'timeout' } })
           await new Promise(r => setTimeout(r, 15_000))
           continue
         }
+        log.error('gemini erro fatal', err, { step: 'gemini-generate', durationMs: Date.now() - start, data: { model, attempt } })
         throw err
       }
     }
-    console.warn(`⚠️ Modelo ${model} esgotou tentativas — ${models.indexOf(model) + 1 < models.length ? 'tentando fallback' : 'sem mais fallbacks'}`)
+    log.warn('modelo esgotou tentativas', { step: 'gemini-generate', data: { model, hasMore: models.indexOf(model) + 1 < models.length } })
   }
   throw lastError
 }

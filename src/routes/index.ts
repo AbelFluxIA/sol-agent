@@ -6,6 +6,7 @@ import { generateAndSendItinerary } from '../agents/sol.agent'
 import { getOrCreateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit } from '../services/database.service'
 import { markAsRead, downloadMedia, sendWithTyping } from '../services/whatsapp.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
+import { log } from '../logger'
 import { config } from '../config'
 
 const router = Router()
@@ -31,10 +32,10 @@ function scheduleProcess(phone: string): void {
     if (messages.length === 0) return
 
     const combined = messages.join('\n')
-    console.log(`📦 [${phone}] Processando ${messages.length} mensagem(ns) acumulada(s)`)
+    log.info('processando buffer', { phone, data: { count: messages.length } })
 
     processMessage(phone, combined).catch(err => {
-      console.error(`❌ Erro ao processar mensagens de ${phone}:`, err)
+      log.error('erro ao processar mensagem', err, { phone })
     })
   }, BUFFER_DELAY_MS)
 
@@ -107,7 +108,7 @@ async function saveCustomerPhoto(phone: string, mediaId: string, hasCompanion: b
     body: JSON.stringify({ p_phone: phone, p_url: photoUrl }),
   })
 
-  console.log(`📸 Foto salva para ${phone}: ${photoUrl}`)
+  log.info('foto salva', { phone, step: 'save-photo', data: { photoUrl } })
 
   // Se tem acompanhante: narração da Sol + adiciona ao mural de memórias
   if (hasCompanion) {
@@ -165,39 +166,39 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
     } else if (type === 'audio') {
       const mediaId = messageObj.audio?.id
       if (!mediaId) return
-      console.log(`🎙️ [${phone}] Áudio recebido — transcrevendo...`)
+      log.info('áudio recebido', { phone, step: 'whisper-transcribe' })
       try {
-        const { buffer, mimeType } = await downloadMedia(mediaId)
-        text = await transcribeAudio(buffer, mimeType)
-        console.log(`🎙️ [${phone}] Transcrição: ${text}`)
+        const { buffer, mimeType } = await log.timed(phone, 'whisper-transcribe', () => downloadMedia(mediaId))
+        text = await log.timed(phone, 'whisper-transcribe', () => transcribeAudio(buffer, mimeType))
+        log.info('transcrição concluída', { phone, step: 'whisper-transcribe', data: { preview: text?.substring(0, 60) } })
       } catch (err) {
-        console.error(`❌ Erro ao transcrever áudio de ${phone}:`, err)
+        log.error('erro ao transcrever áudio', err, { phone, step: 'whisper-transcribe' })
         return
       }
     } else if (type === 'image') {
       const mediaId = messageObj.image?.id
       if (!mediaId) return
-      console.log(`📸 [${phone}] Foto recebida — salvando no perfil...`)
+      log.info('foto recebida', { phone, step: 'save-photo' })
       const convForPhoto = await getOrCreateConversation(phone)
       saveCustomerPhoto(phone, mediaId, convForPhoto.hasCompanion).catch(err =>
-        console.error(`❌ Erro ao salvar foto de ${phone}:`, err)
+        log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
       )
       return
     } else if (type === 'location') {
       const lat = messageObj.location?.latitude
       const lng = messageObj.location?.longitude
       if (!lat || !lng) return
-      console.log(`📍 [${phone}] Localização recebida: ${lat}, ${lng}`)
+      log.info('localização recebida', { phone, data: { lat, lng } })
       // Encaminha como mensagem de texto para o agente processar (modo acompanhante)
       text = `[LOCALIZAÇÃO: lat=${lat}, lng=${lng}]`
     } else {
-      console.log(`⚠️ Tipo de mensagem não suportado: ${type}`)
+      log.warn('tipo de mensagem não suportado', { phone, data: { type } })
       return
     }
 
     if (!text?.trim()) return
 
-    console.log(`📨 [${phone}] ${text.substring(0, 80)}`)
+    log.info('texto recebido', { phone, data: { preview: text.substring(0, 80) } })
 
     // Acumula no buffer e reinicia o timer de 10s
     const buffer = messageBuffer.get(phone) ?? []
@@ -206,7 +207,7 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
     scheduleProcess(phone)
 
   } catch (error) {
-    console.error('❌ Erro no webhook WhatsApp:', error)
+    log.error('erro no webhook whatsapp', error, {})
   }
 })
 
@@ -216,12 +217,12 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
 router.post('/webhook/payment', async (req: Request, res: Response) => {
   try {
     const body = req.body
-    console.log('💰 Webhook Abacate Pay recebido:', JSON.stringify(body, null, 2))
+    log.info('webhook pagamento recebido', { data: body })
     res.status(200).json({ ok: true })
 
     const status = body?.payment?.status || body?.status
     if (status !== 'PAID' && status !== 'approved' && status !== 'paid') {
-      console.log(`⚠️ Pagamento com status "${status}", ignorando`)
+      log.info('pagamento ignorado', { data: { status } })
       return
     }
 
@@ -233,11 +234,11 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
     const paymentId = body?.payment?.id || body?.id
 
     if (!phone) {
-      console.error('❌ Telefone não encontrado no webhook de pagamento:', body)
+      log.error('telefone não encontrado no webhook de pagamento', new Error('missing phone'), { data: body })
       return
     }
 
-    console.log(`✅ Pagamento confirmado para ${phone} (ID: ${paymentId})`)
+    log.info('pagamento confirmado', { phone, data: { paymentId } })
 
     const itinerary = await getLatestItinerary(phone)
     if (itinerary) {
@@ -252,16 +253,16 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
         await addFreeCredit(referrerPhone)
         const { sendWithTyping } = await import('../services/whatsapp.service')
         sendWithTyping(referrerPhone, 'Alguém usou seu link de indicação e acabou de pagar! 🎉 Você ganhou 1 roteiro grátis — é só usar quando quiser.', 500)
-          .catch(err => console.warn('⚠️ Notificação de referral falhou:', err.message))
-        console.log(`🎁 Crédito grátis enviado para referrer ${referrerPhone}`)
+          .catch(err => log.warn('notificação de referral falhou', { phone: referrerPhone, data: { msg: err.message } }))
+        log.info('crédito grátis enviado ao referrer', { phone: referrerPhone })
       }
     }
 
     generateAndSendItinerary(phone).catch(err => {
-      console.error(`❌ Erro ao gerar roteiro pós-pagamento para ${phone}:`, err)
+      log.error('erro ao gerar roteiro pós-pagamento', err, { phone })
     })
   } catch (error) {
-    console.error('❌ Erro no webhook de pagamento:', error)
+    log.error('erro no webhook de pagamento', error, {})
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -283,10 +284,10 @@ router.post('/internal/reset-session', async (req: Request, res: Response) => {
     // Reseta conversa no banco
     await resetConversation(phone)
 
-    console.log(`🔄 [${phone}] Sessão reiniciada pelo Zynk`)
+    log.info('sessão reiniciada pelo zynk', { phone })
     res.json({ success: true })
   } catch (err: any) {
-    console.error('Erro ao resetar sessão:', err.message)
+    log.error('erro ao resetar sessão', err, { phone: req.body?.phone })
     res.status(500).json({ error: err.message })
   }
 })
@@ -322,7 +323,7 @@ router.post('/internal/generate-itinerary', async (req: Request, res: Response) 
   if (!phone) return res.status(400).json({ error: 'phone obrigatório' })
   res.json({ ok: true, message: 'Geração iniciada' })
   generateAndSendItinerary(phone).catch(err => {
-    console.error(`❌ Erro ao gerar roteiro manual para ${phone}:`, err)
+    log.error('erro ao gerar roteiro manual', err, { phone })
   })
 })
 
