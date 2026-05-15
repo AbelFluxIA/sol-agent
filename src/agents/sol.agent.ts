@@ -256,7 +256,7 @@ async function handleConsultarCreditos(phone: string): Promise<void> {
 Veja o histórico completo:`
 
   await saveMessage(phone, 'assistant', `${msg}\n${statsUrl}`)
-  await sendCtaButton(phone, msg, 'Ver minha conta 📊', statsUrl)
+  await sendCtaButton(phone, msg, 'Ver minha conta', statsUrl)
 }
 
 // ----------------------------------------------------------------
@@ -336,7 +336,7 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
       const interactiveMsg = `Aqui está o seu roteiro interativo — marque cada atividade conforme for fazendo! ✅`
       await saveMessage(phone, 'assistant', `${interactiveMsg}\n${interactiveUrl}`)
       try {
-        await sendCtaButton(phone, interactiveMsg, 'Ver roteiro interativo', interactiveUrl)
+        await sendCtaButton(phone, interactiveMsg, 'Abrir roteiro', interactiveUrl)
       } catch {
         // CTA falhou (domínio não registrado no Meta) — envia como texto simples
         await sendWithTyping(phone, `${interactiveMsg}\n\n${interactiveUrl}`, 500)
@@ -369,7 +369,7 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
       const refName = name || convName || 'você'
       const { bodyText: refBody, ctaUrl: refUrl } = buildReferralMessage(refName, referralCode, config.whatsappNumber)
       await saveMessage(phone, 'assistant', refBody)
-      await sendCtaButton(phone, refBody, 'Meu link de indicação 🔗', refUrl)
+      await sendCtaButton(phone, refBody, 'Ver meu link', refUrl)
     }
 
     log.info('roteiro enviado com sucesso', { phone })
