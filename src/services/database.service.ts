@@ -57,6 +57,7 @@ export async function updateConversation(
     touristProfile: string
     destination: string
     hasPaid: boolean
+    hasCompanion: boolean
     freeCredits: number
     referredBy: string
   }>
@@ -223,6 +224,46 @@ export async function addFreeCredit(phone: string): Promise<void> {
     data: { freeCredits: { increment: 1 } },
   })
   console.log(`🎁 Crédito grátis adicionado para ${phone}`)
+}
+
+// Desativa companions de viagens que já terminaram (cron diário)
+export async function deactivateExpiredCompanions(): Promise<number> {
+  const today = new Date().toISOString().split('T')[0] // YYYY-MM-DD
+  const expired = await prisma.conversation.findMany({
+    where: {
+      hasCompanion: true,
+      departureDate: { lt: today },
+    },
+    select: { phone: true, name: true },
+  })
+
+  if (expired.length === 0) return 0
+
+  await prisma.conversation.updateMany({
+    where: {
+      hasCompanion: true,
+      departureDate: { lt: today },
+    },
+    data: { hasCompanion: false },
+  })
+
+  return expired.length
+}
+
+// Retorna usuários que chegam amanhã (para checklist pré-viagem)
+export async function getTomorrowArrivals(): Promise<{ phone: string; name: string | null; destination: string | null }[]> {
+  const tomorrow = new Date()
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  const tomorrowStr = tomorrow.toISOString().split('T')[0]
+
+  return prisma.conversation.findMany({
+    where: {
+      arrivalDate: tomorrowStr,
+      hasPaid: true,
+      phase: { gte: 5 },
+    },
+    select: { phone: true, name: true, destination: true },
+  })
 }
 
 // Retorna estatísticas de créditos e indicações do usuário

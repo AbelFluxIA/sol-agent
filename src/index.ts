@@ -4,6 +4,7 @@ import express from 'express'
 import { config } from './config'
 import routes from './routes'
 import prisma from './services/database.service'
+import { startDailyJobs } from './jobs/daily'
 
 const app = express()
 
@@ -29,6 +30,8 @@ async function bootstrap() {
     await prisma.$connect()
     console.log('✅ Banco de dados conectado')
 
+    startDailyJobs()
+
     app.listen(config.port, () => {
       console.log(`
 ☀️  Sol Agent rodando!
@@ -36,6 +39,8 @@ async function bootstrap() {
    → Health: http://localhost:${config.port}/health
    → Webhook WhatsApp: POST /webhook/whatsapp
    → Webhook Pagamento: POST /webhook/payment
+   → Webhook Companion: POST /webhook/payment-companion
+   → Logs: GET /internal/logs
       `)
     })
   } catch (error) {

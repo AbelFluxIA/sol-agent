@@ -15,6 +15,8 @@ import {
   saveMessage,
   getRecentMessages,
   createItinerary,
+  updateItinerary,
+  getLatestItinerary,
   getReferrerPhone,
   addFreeCredit,
   getAccountStats,
@@ -31,6 +33,7 @@ import {
   buildFreeItineraryMessage,
   buildReferralMessage,
   buildCompanionOfferMessage,
+  buildCompanionPaymentCta,
 } from '../prompts/sol.prompts'
 import { PRICES, ValidDays } from '../types'
 
@@ -88,12 +91,17 @@ export async function processMessage(phone: string, userMessage: string): Promis
   const history = await getRecentMessages(phone, 20)
 
   // 4. Chama a Sol (OpenAI com tools)
-  // Adiciona contexto de acompanhante ao system prompt
-  const companionContext = conversation.hasCompanion
-    ? '\n\n[MODO ACOMPANHANTE ATIVO — hasCompanion: true. Oriente o cliente em tempo real com base no roteiro.]'
-    : conversation.phase >= 5
-    ? '\n\n[hasCompanion: false. Modo limitado: não oriente sobre o roteiro atual. Apenas novas viagens e dúvidas gerais.]'
-    : ''
+  // Monta contexto de companhante — carrega roteiro completo quando ativo
+  let companionContext = ''
+  if (conversation.hasCompanion) {
+    const itinerary = await getLatestItinerary(phone)
+    const itinerarySection = itinerary?.rawItinerary
+      ? `\n\n[ROTEIRO COMPLETO DO CLIENTE (use para orientação em tempo real):\n${itinerary.rawItinerary.substring(0, 8000)}]`
+      : ''
+    companionContext = `\n\n[MODO ACOMPANHANTE ATIVO — hasCompanion: true. Oriente o cliente em tempo real.]${itinerarySection}`
+  } else if (conversation.phase >= 5) {
+    companionContext = '\n\n[hasCompanion: false. MODO LIMITADO: não dê orientações sobre o roteiro atual do cliente. Responda apenas dúvidas gerais de viagem, geração de novos roteiros ou informações sobre o serviço.]'
+  }
 
   const response = await openai.chat.completions.create({
     model: config.openai.model,
@@ -320,6 +328,12 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
       })
     )
 
+    // Salva texto no banco para a Sol Acompanhante usar como contexto
+    const latestIt = await getLatestItinerary(phone)
+    if (latestIt) {
+      await updateItinerary(latestIt.id, { rawItinerary: itineraryText })
+    }
+
     // Gera o PDF com o roteiro completo
     const { pdfUrl, shareCode } = await log.timed(phone, 'generate-pdf', () =>
       generatePdf({
@@ -356,11 +370,22 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
     // Marca como pago e roteiro enviado
     await updateConversation(phone, { hasPaid: true, phase: 5 })
 
-    // Oferta da Sol Acompanhante (estrutura pronta — link de pagamento virá depois)
+    // Oferta da Sol Acompanhante + botão de pagamento
     await sleep(2000)
     const companionMsg = buildCompanionOfferMessage(name)
     await saveMessage(phone, 'assistant', companionMsg)
     await sendWithTyping(phone, companionMsg, 800)
+
+    if (config.companionPaymentLink) {
+      await sleep(1000)
+      const ctaText = buildCompanionPaymentCta()
+      await saveMessage(phone, 'assistant', `${ctaText}\n${config.companionPaymentLink}`)
+      try {
+        await sendCtaButton(phone, ctaText, 'Ativar agora', config.companionPaymentLink)
+      } catch {
+        await sendWithTyping(phone, `${ctaText}\n\n${config.companionPaymentLink}`, 300)
+      }
+    }
 
     // Envia mensagem de afiliação após roteiro
     const { referralCode, name: convName } = conversation

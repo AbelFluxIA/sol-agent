@@ -3,9 +3,12 @@ import OpenAI from 'openai'
 import { toFile } from 'openai'
 import { processMessage } from '../agents/sol.agent'
 import { generateAndSendItinerary } from '../agents/sol.agent'
-import { getOrCreateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit } from '../services/database.service'
+import fs from 'fs'
+import path from 'path'
+import { getOrCreateConversation, updateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit } from '../services/database.service'
 import { markAsRead, downloadMedia, sendWithTyping } from '../services/whatsapp.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
+import { buildCompanionActivatedMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
 import { config } from '../config'
 
@@ -180,9 +183,24 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
       if (!mediaId) return
       log.info('foto recebida', { phone, step: 'save-photo' })
       const convForPhoto = await getOrCreateConversation(phone)
-      saveCustomerPhoto(phone, mediaId, convForPhoto.hasCompanion).catch(err =>
-        log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
-      )
+      if (convForPhoto.hasCompanion) {
+        // Companion ativa: narra a foto e adiciona ao mural
+        saveCustomerPhoto(phone, mediaId, true).catch(err =>
+          log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
+        )
+      } else {
+        // Sem companion: salva silenciosamente + manda ack se já tem roteiro
+        saveCustomerPhoto(phone, mediaId, false).catch(err =>
+          log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
+        )
+        if (convForPhoto.hasPaid) {
+          await sendWithTyping(
+            phone,
+            'Foto recebida e salva 📸 Com a Sol Acompanhante eu narro cada momento e monto um mural de memórias da sua viagem. Quer ativar?',
+            800
+          )
+        }
+      }
       return
     } else if (type === 'location') {
       const lat = messageObj.location?.latitude
@@ -268,6 +286,46 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
 })
 
 // ----------------------------------------------------------------
+// POST /webhook/payment-companion — confirmação de pagamento da Sol Acompanhante
+// ----------------------------------------------------------------
+router.post('/webhook/payment-companion', async (req: Request, res: Response) => {
+  try {
+    const body = req.body
+    log.info('webhook pagamento companion recebido', { data: body })
+    res.status(200).json({ ok: true })
+
+    const status = body?.payment?.status || body?.status
+    if (status !== 'PAID' && status !== 'approved' && status !== 'paid') {
+      log.info('companion payment ignorado', { data: { status } })
+      return
+    }
+
+    const phone =
+      body?.payment?.metadata?.phone ||
+      body?.metadata?.phone ||
+      body?.customer?.phone
+
+    if (!phone) {
+      log.error('telefone não encontrado no webhook companion', new Error('missing phone'), { data: body })
+      return
+    }
+
+    log.info('companion payment confirmado', { phone })
+
+    await updateConversation(phone, { hasCompanion: true })
+
+    const conv = await getOrCreateConversation(phone)
+    const name = conv.name || 'você'
+    const msg = buildCompanionActivatedMessage(name)
+    await sendWithTyping(phone, msg, 600)
+
+  } catch (error) {
+    log.error('erro no webhook companion', error, {})
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ----------------------------------------------------------------
 // POST /internal/reset-session — chamado pelo Zynk ao reiniciar conversa
 // ----------------------------------------------------------------
 router.post('/internal/reset-session', async (req: Request, res: Response) => {
@@ -297,6 +355,70 @@ router.post('/internal/reset-session', async (req: Request, res: Response) => {
 // ----------------------------------------------------------------
 router.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'Sol Agent', timestamp: new Date().toISOString() })
+})
+
+// ----------------------------------------------------------------
+// GET /internal/logs — visualizador de logs JSON estruturado
+// ----------------------------------------------------------------
+router.get('/internal/logs', (req: Request, res: Response) => {
+  const lines   = Math.min(Number(req.query.lines) || 200, 2000)
+  const phone   = (req.query.phone as string) || ''
+  const level   = (req.query.level as string) || ''
+  const outFile = '/root/.pm2/logs/sol-agent-out.log'
+  const errFile = '/root/.pm2/logs/sol-agent-error.log'
+
+  function readTail(filePath: string, n: number): string[] {
+    try {
+      const content = fs.readFileSync(filePath, 'utf8')
+      return content.split('\n').filter(Boolean).slice(-n)
+    } catch { return [] }
+  }
+
+  const raw = [...readTail(errFile, lines), ...readTail(outFile, lines)]
+  const parsed = raw.flatMap(line => {
+    try { return [JSON.parse(line)] } catch { return [] }
+  })
+
+  let filtered = parsed
+  if (phone) filtered = filtered.filter((e: any) => e.phone === phone)
+  if (level) filtered = filtered.filter((e: any) => e.level === level)
+  filtered.sort((a: any, b: any) => (a.ts > b.ts ? 1 : -1))
+
+  if (req.headers.accept?.includes('text/html')) {
+    const rows = filtered.slice(-lines).map((e: any) => {
+      const color = e.level === 'error' ? '#ff6b6b' : e.level === 'warn' ? '#ffd93d' : '#6bcb77'
+      const dur = e.durationMs ? ` <span style="color:#aaa">${e.durationMs}ms</span>` : ''
+      const errDetail = e.error ? `<br><small style="color:#ff9999">${e.error.message}</small>` : ''
+      return `<tr><td style="color:#aaa;white-space:nowrap">${e.ts?.substring(11,19)||''}</td><td style="color:${color}">${e.level}</td><td style="color:#88c">${e.phone||''}</td><td style="color:#8cf">${e.step||''}</td><td>${e.msg}${dur}${errDetail}</td></tr>`
+    }).join('')
+    res.setHeader('Content-Type', 'text/html')
+    return res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sol Logs</title>
+<meta http-equiv="refresh" content="15">
+<style>body{background:#111;color:#ddd;font-family:monospace;font-size:13px;padding:8px}
+table{width:100%;border-collapse:collapse}td{padding:3px 8px;border-bottom:1px solid #222}
+input{background:#222;color:#ddd;border:1px solid #444;padding:4px 8px;border-radius:4px;margin-right:8px}
+a{color:#88c;text-decoration:none}.hdr{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+</style></head><body>
+<div class="hdr">
+  <b style="color:#ffd93d">☀️ Sol Logs</b>
+  <form method="get" style="display:flex;gap:6px">
+    <input name="phone" placeholder="filtrar por telefone" value="${phone}">
+    <select name="level" style="background:#222;color:#ddd;border:1px solid #444;padding:4px">
+      <option value="">todos</option>
+      <option value="error" ${level==='error'?'selected':''}>error</option>
+      <option value="warn" ${level==='warn'?'selected':''}>warn</option>
+      <option value="info" ${level==='info'?'selected':''}>info</option>
+    </select>
+    <input name="lines" placeholder="linhas" value="${lines}" style="width:60px">
+    <button style="background:#333;color:#ddd;border:1px solid #555;padding:4px 10px;border-radius:4px;cursor:pointer">Filtrar</button>
+  </form>
+  <small style="color:#666">auto-refresh 15s | ${filtered.length} entradas</small>
+</div>
+<table><thead><tr><th>hora</th><th>nível</th><th>telefone</th><th>step</th><th>mensagem</th></tr></thead>
+<tbody>${rows}</tbody></table></body></html>`)
+  }
+
+  res.json(filtered.slice(-lines))
 })
 
 // ----------------------------------------------------------------
