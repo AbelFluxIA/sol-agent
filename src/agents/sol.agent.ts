@@ -21,7 +21,7 @@ import {
   addFreeCredit,
   getAccountStats,
 } from '../services/database.service'
-import { sendWithTyping, sendParts, sendCtaButton } from '../services/whatsapp.service'
+import { sendWithTyping, sendHuman, sendCtaButton } from '../services/whatsapp.service'
 import { checkAndDeductCredit } from '../services/credits.service'
 import { getWeatherAndMarine } from '../services/weather.service'
 import { generateItineraryText, classifyDays } from './itinerary.agent'
@@ -182,9 +182,9 @@ export async function processMessage(phone: string, userMessage: string): Promis
     return
   }
 
-  // 7. Salva resposta e envia em partes (mais humano)
+  // 7. Salva resposta e envia humanizado (quebrado em partes naturais)
   await saveMessage(phone, 'assistant', replyText)
-  await sendParts(phone, splitResponse(replyText))
+  await sendHuman(phone, replyText)
 
   // 8. Atualiza fase se necessário
   await updatePhaseFromResponse(phone, replyText, conversation.phase)
@@ -219,7 +219,7 @@ async function handleAtivarAcompanhante(phone: string): Promise<void> {
   const ctaText  = buildCompanionPaymentCta()
 
   await saveMessage(phone, 'assistant', offerMsg)
-  await sendWithTyping(phone, offerMsg, 800)
+  await sendHuman(phone, offerMsg)
   await sleep(1000)
   await saveMessage(phone, 'assistant', `${ctaText}\n${config.companionPaymentLink}`)
   try {
@@ -454,7 +454,7 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
       await sleep(2000)
       const companionMsg = buildCompanionOfferMessage(name)
       await saveMessage(phone, 'assistant', companionMsg)
-      await sendWithTyping(phone, companionMsg, 800)
+      await sendHuman(phone, companionMsg)
 
       if (config.companionPaymentLink) {
         await sleep(1000)
@@ -475,6 +475,7 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
       const refName = name || convName || 'você'
       const { bodyText: refBody, ctaUrl: refUrl } = buildReferralMessage(refName, referralCode, config.whatsappNumber)
       await saveMessage(phone, 'assistant', refBody)
+      // Referral é mensagem curta com botão — usar CTA diretamente
       await sendCtaButton(phone, refBody, 'Ver meu link', refUrl)
     }
 
@@ -487,32 +488,6 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
       1000
     )
   }
-}
-
-// ----------------------------------------------------------------
-// Divide resposta longa em partes para envio humanizado
-// ----------------------------------------------------------------
-function splitResponse(text: string): string[] {
-  const paragraphs = text.split(/\n\n+/).filter(p => p.trim().length > 0)
-  if (paragraphs.length <= 1) return [text]
-
-  const parts: string[] = []
-  let current = ''
-
-  for (const p of paragraphs) {
-    if (!current) {
-      current = p
-    } else if (current.length < 60) {
-      // fragmento muito curto — agrega só se minúsculo
-      current = `${current}\n\n${p}`
-    } else {
-      parts.push(current)
-      current = p
-    }
-  }
-  if (current) parts.push(current)
-
-  return parts
 }
 
 // ----------------------------------------------------------------

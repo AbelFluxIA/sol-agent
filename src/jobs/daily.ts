@@ -1,5 +1,5 @@
 import { deactivateExpiredCompanions, getTomorrowArrivals } from '../services/database.service'
-import { sendWithTyping } from '../services/whatsapp.service'
+import { sendHuman } from '../services/whatsapp.service'
 import { buildPreTripMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
 
@@ -39,7 +39,7 @@ async function jobPreTripChecklist() {
   for (const { phone, name, destination } of arrivals) {
     try {
       const msg = buildPreTripMessage(name || 'viajante', destination || 'seu destino')
-      await sendWithTyping(phone, msg, 600)
+      await sendHuman(phone, msg)
       log.info('checklist enviado', { phone, data: { destination } })
     } catch (err) {
       log.error('erro ao enviar checklist', err, { phone })

@@ -6,7 +6,7 @@ import { generateAndSendItinerary } from '../agents/sol.agent'
 import fs from 'fs'
 import path from 'path'
 import { getOrCreateConversation, updateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit } from '../services/database.service'
-import { markAsRead, downloadMedia, sendWithTyping } from '../services/whatsapp.service'
+import { markAsRead, downloadMedia, sendWithTyping, sendHuman } from '../services/whatsapp.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
 import { buildCompanionActivatedMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
@@ -317,7 +317,7 @@ router.post('/webhook/payment-companion', async (req: Request, res: Response) =>
     const conv = await getOrCreateConversation(phone)
     const name = conv.name || 'você'
     const msg = buildCompanionActivatedMessage(name)
-    await sendWithTyping(phone, msg, 600)
+    await sendHuman(phone, msg)
 
   } catch (error) {
     log.error('erro no webhook companion', error, {})

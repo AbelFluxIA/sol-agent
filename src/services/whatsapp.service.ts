@@ -38,6 +38,80 @@ async function notifyZynk(to: string, content: string, whatsappMessageId?: strin
   }).catch(() => {})
 }
 
+// Divide texto de forma humana: respeita parágrafos, agrupa listas, máx 4 partes
+export function humanSplit(text: string, maxParts = 4): string[] {
+  const blocks = text.split(/\n\n+/).map(b => b.trim()).filter(Boolean)
+  if (blocks.length <= 1) return [text.trim()]
+
+  // Detecta item de lista (começa com emoji ou símbolo de bullet)
+  const isBullet = (s: string) =>
+    /^[\u{1F300}-\u{1FAFF}☐•✓✗▶]/u.test(s.trim()) && s.trim().length < 200
+
+  const parts: string[] = []
+  let current = ''
+  let inBulletGroup = false
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]
+    const nextIsBullet = blocks[i + 1] ? isBullet(blocks[i + 1]) : false
+    const curIsBullet = isBullet(block)
+
+    if (!current) {
+      current = block
+      inBulletGroup = curIsBullet
+      continue
+    }
+
+    if (inBulletGroup && curIsBullet) {
+      // Continua agrupando itens da lista
+      current = `${current}\n\n${block}`
+    } else if (!inBulletGroup && curIsBullet) {
+      // Começa grupo de lista — fecha parágrafo atual
+      if (current) parts.push(current)
+      current = block
+      inBulletGroup = true
+    } else if (inBulletGroup && !curIsBullet) {
+      // Saiu da lista — fecha grupo, começa texto normal
+      parts.push(current)
+      current = block
+      inBulletGroup = false
+    } else if (current.length < 90) {
+      // Parágrafo muito curto — agrega com o próximo
+      current = `${current}\n\n${block}`
+    } else {
+      parts.push(current)
+      current = block
+      inBulletGroup = curIsBullet
+    }
+  }
+  if (current) parts.push(current)
+
+  // Se excedeu maxParts, consolida partes intermediárias
+  if (parts.length > maxParts) {
+    const head = parts[0]
+    const tail = parts[parts.length - 1]
+    const middle = parts.slice(1, -1)
+    const grouped: string[] = []
+    const groupSize = Math.ceil(middle.length / (maxParts - 2))
+    for (let i = 0; i < middle.length; i += groupSize) {
+      grouped.push(middle.slice(i, i + groupSize).join('\n\n'))
+    }
+    return [head, ...grouped, tail].filter(Boolean)
+  }
+
+  return parts
+}
+
+// Envia mensagem longa de forma humanizada: quebra em partes naturais + delay de digitação
+export async function sendHuman(phone: string, text: string): Promise<void> {
+  const parts = humanSplit(text)
+  for (const part of parts) {
+    const typingMs = Math.min(Math.max(part.length * 28, 700), 3200)
+    await sleep(typingMs)
+    await sendMessage(phone, part)
+  }
+}
+
 // Envia múltiplas partes com delay proporcional ao tamanho (simula digitação humana)
 export async function sendParts(phone: string, parts: string[]): Promise<void> {
   for (const part of parts) {
@@ -47,7 +121,7 @@ export async function sendParts(phone: string, parts: string[]): Promise<void> {
   }
 }
 
-// Atalho para mensagem única com delay
+// Atalho para mensagem única com delay (use para frases curtas < 120 chars)
 export async function sendWithTyping(phone: string, text: string, typingMs = 1500): Promise<void> {
   await sleep(typingMs)
   await sendMessage(phone, text)
