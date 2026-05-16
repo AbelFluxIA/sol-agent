@@ -73,6 +73,15 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'ativar_acompanhante',
+      description:
+        'Envia o link para ativar a Sol Acompanhante. Use quando o cliente pedir para ativar, quiser o acompanhamento em tempo real, perguntar sobre a Sol Acompanhante ou quiser saber como ativar.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'roteiro_personalizado',
       description:
         'Gera novo link de pagamento com número de dias específico. Use quando o cliente quiser mudar o número de dias — tanto ANTES de pagar (fase 4) quanto depois (fase 5).',

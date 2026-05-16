@@ -226,13 +226,17 @@ export async function addFreeCredit(phone: string): Promise<void> {
   console.log(`🎁 Crédito grátis adicionado para ${phone}`)
 }
 
-// Desativa companions de viagens que já terminaram (cron diário)
+// Desativa companions 1 dia após a data de partida
 export async function deactivateExpiredCompanions(): Promise<number> {
-  const today = new Date().toISOString().split('T')[0] // YYYY-MM-DD
+  // Só desativa se departureDate < ontem (1 dia de buffer)
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  const cutoff = yesterday.toISOString().split('T')[0]
+
   const expired = await prisma.conversation.findMany({
     where: {
       hasCompanion: true,
-      departureDate: { lt: today },
+      departureDate: { lt: cutoff },
     },
     select: { phone: true, name: true },
   })
@@ -242,7 +246,7 @@ export async function deactivateExpiredCompanions(): Promise<number> {
   await prisma.conversation.updateMany({
     where: {
       hasCompanion: true,
-      departureDate: { lt: today },
+      departureDate: { lt: cutoff },
     },
     data: { hasCompanion: false },
   })

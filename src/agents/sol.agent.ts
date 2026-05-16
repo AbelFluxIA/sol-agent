@@ -43,6 +43,44 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+// Extrai só o dia atual do roteiro (baseado na data de chegada vs hoje)
+// Reduz tokens de ~2000 para ~400 no contexto do companion
+function extractCurrentDaySection(rawItinerary: string, arrivalDate: string | null): string {
+  if (!arrivalDate) return rawItinerary.substring(0, 2000)
+
+  const arrival = new Date(arrivalDate + 'T00:00:00')
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const dayIndex = Math.floor((today.getTime() - arrival.getTime()) / 86_400_000) + 1
+  // dayIndex = 1 no dia de chegada, 2 no seguinte, etc.
+
+  const clamp = Math.max(1, Math.min(dayIndex, 15))
+
+  // Parte o roteiro nas seções DIA N
+  const dayPattern = /(?=DIA\s*\d+)/gi
+  const sections = rawItinerary.split(dayPattern)
+
+  // Pega o dia atual e o próximo (contexto de transição)
+  const targetDay = sections.find(s => new RegExp(`^DIA\\s*${clamp}\\b`, 'i').test(s.trim()))
+  const nextDay   = sections.find(s => new RegExp(`^DIA\\s*${clamp + 1}\\b`, 'i').test(s.trim()))
+
+  if (!targetDay) return rawItinerary.substring(0, 2000)
+
+  const combined = [targetDay, nextDay].filter(Boolean).join('\n\n')
+  return combined.substring(0, 2500) // ~600 tokens
+}
+
+// Verifica se o usuário tem viagem ativa ou futura
+function hasTripActive(departureDate: string | null): boolean {
+  if (!departureDate) return false
+  const dep = new Date(departureDate + 'T23:59:59')
+  const tomorrow = new Date()
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  tomorrow.setHours(0, 0, 0, 0)
+  // Considera ativa até 1 dia depois da partida (deactivation buffer)
+  return dep >= new Date()
+}
+
 // Detecta tentativas de prompt injection / jailbreak antes de enviar ao modelo
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?(previous|prior|above|your)\s+instructions?/i,
@@ -91,14 +129,14 @@ export async function processMessage(phone: string, userMessage: string): Promis
   const history = await getRecentMessages(phone, 20)
 
   // 4. Chama a Sol (OpenAI com tools)
-  // Monta contexto de companhante — carrega roteiro completo quando ativo
+  // Monta contexto de companhante — injeta só o dia atual (não o roteiro inteiro)
   let companionContext = ''
   if (conversation.hasCompanion) {
     const itinerary = await getLatestItinerary(phone)
     const itinerarySection = itinerary?.rawItinerary
-      ? `\n\n[ROTEIRO COMPLETO DO CLIENTE (use para orientação em tempo real):\n${itinerary.rawItinerary.substring(0, 8000)}]`
+      ? `\n\n[ROTEIRO DO CLIENTE — DIA ATUAL:\n${extractCurrentDaySection(itinerary.rawItinerary, conversation.arrivalDate)}]`
       : ''
-    companionContext = `\n\n[MODO ACOMPANHANTE ATIVO — hasCompanion: true. Oriente o cliente em tempo real.]${itinerarySection}`
+    companionContext = `\n\n[MODO ACOMPANHANTE ATIVO — hasCompanion: true. Oriente em tempo real com base no roteiro abaixo.]${itinerarySection}`
   } else if (conversation.phase >= 5) {
     companionContext = '\n\n[hasCompanion: false. MODO LIMITADO: não dê orientações sobre o roteiro atual do cliente. Responda apenas dúvidas gerais de viagem, geração de novos roteiros ou informações sobre o serviço.]'
   }
@@ -131,6 +169,8 @@ export async function processMessage(phone: string, userMessage: string): Promis
       await handleRoteiroPersonalizado(phone, toolArgs as RoteiroPersonalizadoArgs)
     } else if (toolName === 'consultar_meus_creditos') {
       await handleConsultarCreditos(phone)
+    } else if (toolName === 'ativar_acompanhante') {
+      await handleAtivarAcompanhante(phone)
     }
     return
   }
@@ -148,6 +188,45 @@ export async function processMessage(phone: string, userMessage: string): Promis
 
   // 8. Atualiza fase se necessário
   await updatePhaseFromResponse(phone, replyText, conversation.phase)
+}
+
+// ----------------------------------------------------------------
+// Handler: ativar_acompanhante
+// ----------------------------------------------------------------
+async function handleAtivarAcompanhante(phone: string): Promise<void> {
+  const conversation = await getOrCreateConversation(phone)
+
+  if (conversation.hasCompanion) {
+    await sendWithTyping(phone, 'A Sol Acompanhante já está ativa para você! É só mandar sua localização ou me perguntar qualquer coisa sobre o roteiro. ☀️', 600)
+    return
+  }
+
+  if (!hasTripActive(conversation.departureDate)) {
+    const msg = conversation.departureDate
+      ? 'Essa viagem já encerrou. Quando você planejar a próxima, posso te acompanhar do primeiro ao último dia!'
+      : 'Para ativar a Sol Acompanhante você precisa ter um roteiro ativo. Vamos montar um primeiro?'
+    await sendWithTyping(phone, msg, 600)
+    return
+  }
+
+  if (!config.companionPaymentLink) {
+    await sendWithTyping(phone, 'A ativação estará disponível em breve! Me avise e eu te mando o link assim que estiver pronto.', 600)
+    return
+  }
+
+  const name = conversation.name || 'você'
+  const offerMsg = buildCompanionOfferMessage(name)
+  const ctaText  = buildCompanionPaymentCta()
+
+  await saveMessage(phone, 'assistant', offerMsg)
+  await sendWithTyping(phone, offerMsg, 800)
+  await sleep(1000)
+  await saveMessage(phone, 'assistant', `${ctaText}\n${config.companionPaymentLink}`)
+  try {
+    await sendCtaButton(phone, ctaText, 'Ativar agora', config.companionPaymentLink)
+  } catch {
+    await sendWithTyping(phone, `${ctaText}\n\n${config.companionPaymentLink}`, 300)
+  }
 }
 
 // ----------------------------------------------------------------
@@ -370,20 +449,22 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
     // Marca como pago e roteiro enviado
     await updateConversation(phone, { hasPaid: true, phase: 5 })
 
-    // Oferta da Sol Acompanhante + botão de pagamento
-    await sleep(2000)
-    const companionMsg = buildCompanionOfferMessage(name)
-    await saveMessage(phone, 'assistant', companionMsg)
-    await sendWithTyping(phone, companionMsg, 800)
+    // Oferta da Sol Acompanhante — só se a viagem ainda está ativa/futura
+    if (hasTripActive(departureDate)) {
+      await sleep(2000)
+      const companionMsg = buildCompanionOfferMessage(name)
+      await saveMessage(phone, 'assistant', companionMsg)
+      await sendWithTyping(phone, companionMsg, 800)
 
-    if (config.companionPaymentLink) {
-      await sleep(1000)
-      const ctaText = buildCompanionPaymentCta()
-      await saveMessage(phone, 'assistant', `${ctaText}\n${config.companionPaymentLink}`)
-      try {
-        await sendCtaButton(phone, ctaText, 'Ativar agora', config.companionPaymentLink)
-      } catch {
-        await sendWithTyping(phone, `${ctaText}\n\n${config.companionPaymentLink}`, 300)
+      if (config.companionPaymentLink) {
+        await sleep(1000)
+        const ctaText = buildCompanionPaymentCta()
+        await saveMessage(phone, 'assistant', `${ctaText}\n${config.companionPaymentLink}`)
+        try {
+          await sendCtaButton(phone, ctaText, 'Ativar agora', config.companionPaymentLink)
+        } catch {
+          await sendWithTyping(phone, `${ctaText}\n\n${config.companionPaymentLink}`, 300)
+        }
       }
     }
 
