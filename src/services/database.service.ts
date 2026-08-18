@@ -1,5 +1,6 @@
 // src/services/database.service.ts
 import { PrismaClient } from '@prisma/client'
+import { log } from '../logger'
 
 // Singleton do Prisma — uma única conexão para toda a aplicação
 const prisma = new PrismaClient({
@@ -13,6 +14,28 @@ export function generateReferralCode(): string {
 }
 
 export default prisma
+
+// ----------------------------------------------------------------
+// Sync de nome para o Zynk Chat
+// ----------------------------------------------------------------
+
+function syncContactNameToZynk(phone: string, name: string): void {
+  const url = process.env.ZYNK_SUPABASE_URL
+  const key = process.env.ZYNK_SUPABASE_SERVICE_KEY
+  const orgId = process.env.ZYNK_ORG_ID
+  if (!url || !key || !orgId || !name) return
+
+  fetch(`${url}/rest/v1/whatsapp_conversations?contact_phone=eq.${encodeURIComponent(phone)}&organization_id=eq.${orgId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${key}`,
+      'apikey': key,
+      'Prefer': 'return=minimal',
+    },
+    body: JSON.stringify({ contact_name: name }),
+  }).catch(err => log.warn('sync zynk contact_name falhou', { phone, data: { error: err.message } }))
+}
 
 // ----------------------------------------------------------------
 // Funções de conversa
@@ -35,7 +58,7 @@ export async function getOrCreateConversation(phone: string, name?: string) {
         referralCode: generateReferralCode(),
       },
     })
-    console.log(`📱 Nova conversa criada para ${phone} (2 créditos grátis)`)
+    log.info('nova conversa criada', { phone, step: 'get-or-create-conversation', data: { freeCredits: 2 } })
   }
 
   return conversation
@@ -51,6 +74,9 @@ export async function updateConversation(
     arrivalDate: string
     departureDate: string
     arrivalTime: string
+    departureTime: string
+    originCity: string
+    transportMode: string
     interests: string
     travelStyle: string
     groupType: string
@@ -63,6 +89,9 @@ export async function updateConversation(
   }>
 ) {
   const result = await prisma.conversation.update({ where: { phone }, data })
+
+  // Sincroniza nome com o Zynk Chat
+  if (data.name) syncContactNameToZynk(phone, data.name)
 
   // Sincroniza campos de perfil com a tabela customers
   const profileFields: Record<string, string> = {}
@@ -91,7 +120,7 @@ export async function updateConversation(
         'Prefer': 'return=minimal',
       },
       body: JSON.stringify(profileFields),
-    }).catch(err => console.warn('⚠️ Sync customers falhou:', err.message))
+    }).catch(err => log.warn('sync customers falhou', { phone, step: 'update-conversation', data: { error: err.message } }))
   }
 
   return result
@@ -162,6 +191,7 @@ export async function updateItinerary(
     pdfUrl: string
     rawItinerary: string
     paymentId: string
+    storyPhotoUrl: string
   }>
 ) {
   return prisma.itinerary.update({ where: { id }, data })
@@ -194,7 +224,7 @@ export async function resetConversation(phone: string): Promise<void> {
     },
   })
 
-  console.log(`🔄 Conversa de ${phone} resetada`)
+  log.info('conversa resetada', { phone, step: 'reset-conversation' })
 }
 
 export async function getLatestItinerary(phone: string) {
@@ -223,7 +253,7 @@ export async function addFreeCredit(phone: string): Promise<void> {
     where: { phone },
     data: { freeCredits: { increment: 1 } },
   })
-  console.log(`🎁 Crédito grátis adicionado para ${phone}`)
+  log.info('crédito grátis adicionado', { phone, step: 'add-free-credit' })
 }
 
 // Desativa companions 1 dia após a data de partida
@@ -254,6 +284,21 @@ export async function deactivateExpiredCompanions(): Promise<number> {
   return expired.length
 }
 
+// Retorna usuários cuja viagem encerrou ontem (para survey pós-viagem)
+export async function getYesterdayDepartures(): Promise<{ phone: string; name: string | null; destination: string | null; referralCode: string | null; hasCompanion: boolean }[]> {
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  const yesterdayStr = yesterday.toISOString().split('T')[0]
+
+  return prisma.conversation.findMany({
+    where: {
+      departureDate: yesterdayStr,
+      hasPaid: true,
+    },
+    select: { phone: true, name: true, destination: true, referralCode: true, hasCompanion: true },
+  })
+}
+
 // Retorna usuários que chegam amanhã (para checklist pré-viagem)
 export async function getTomorrowArrivals(): Promise<{ phone: string; name: string | null; destination: string | null }[]> {
   const tomorrow = new Date()
@@ -268,6 +313,29 @@ export async function getTomorrowArrivals(): Promise<{ phone: string; name: stri
     },
     select: { phone: true, name: true, destination: true },
   })
+}
+
+// Retorna companions ativos hoje (para pings de inatividade)
+export async function getActiveCompanions(): Promise<{ phone: string; name: string | null }[]> {
+  const today = new Date().toISOString().split('T')[0]
+  return prisma.conversation.findMany({
+    where: {
+      hasCompanion: true,
+      departureDate: { gte: today },
+    },
+    select: { phone: true, name: true },
+  })
+}
+
+// Retorna o timestamp da última mensagem do usuário (para checar inatividade)
+export async function getLastUserMessageAt(phone: string): Promise<Date | null> {
+  const conv = await prisma.conversation.findUnique({ where: { phone } })
+  if (!conv) return null
+  const msg = await prisma.message.findFirst({
+    where: { conversationId: conv.id, role: 'user' },
+    orderBy: { createdAt: 'desc' },
+  })
+  return msg?.createdAt ?? null
 }
 
 // Retorna estatísticas de créditos e indicações do usuário

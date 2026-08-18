@@ -6,7 +6,7 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
     function: {
       name: 'gerar_roteiro_de_viagem',
       description:
-        'Gera um roteiro de viagem personalizado. Chame SOMENTE após coletar as 8 informações: nome, destino, datas, horário de chegada, interesses/estilo, composição do grupo, hospedagem e horário de volta.',
+        'Gera um roteiro de viagem personalizado. Chame SOMENTE após coletar as 9 informações: nome, destino, cidade de origem, datas, horário de chegada, interesses/estilo, composição do grupo, hospedagem e horário de volta.',
       parameters: {
         type: 'object',
         properties: {
@@ -28,7 +28,17 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
           },
           perfil_do_turista: {
             type: 'string',
-            description: 'Classificação interna do perfil. Ex: "Turista cultural, solo, foco em museus e história, prefere conforto"',
+            description: `Classificação interna do perfil do turista. DEVE incluir explicitamente o tipo de rota, grupo, estilo de orçamento e venues prioritários.
+
+Exemplos obrigatórios por perfil:
+- Negócios: "Turista de negócios, solo, agenda eficiente, foco em coworkings e hubs de negócios, networking, orçamento equilibrado"
+- Inovação/Tech: "Turista de inovação, solo, foco em hubs de tecnologia, startups, parques tecnológicos (ex: PaqTcPB, UFCG), orçamento equilibrado"
+- Praia: "Turista de lazer, casal, foco em praias e piscinas naturais, vida marítima, orçamento econômico"
+- Gastronomia: "Turista gastronômico, família, foco em restaurantes locais, mercados, experiências culinárias, orçamento equilibrado"
+- Cultura: "Turista cultural, solo, foco em museus, centros históricos, patrimônio, orçamento econômico"
+- Aventura: "Turista de aventura, casal, foco em trilhas, esportes radicais, natureza, orçamento equilibrado"
+- Lazer geral: "Turista de lazer, família com 2 crianças, foco em parques, praias calmas, atividades para crianças, orçamento equilibrado"
+NUNCA escreva apenas "viajante econômico" sem especificar o tipo de experiência priorizada.`,
           },
           sozinho_ou_acompanhado: {
             type: 'string',
@@ -46,6 +56,10 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
             type: 'string',
             description: 'Horário aproximado de partida no último dia. Ex: "08:00", "14:00", "20:00". Use "não informado" se o cliente não souber.',
           },
+          cidade_origem: {
+            type: 'string',
+            description: 'Cidade de onde o cliente vai partir. Ex: "Recife - PE", "São Paulo - SP". Use "não informado" se não foi dito.',
+          },
         },
         required: [
           'destino',
@@ -57,6 +71,7 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
           'nome_turista',
           'hotel_hospedagem',
           'horario_volta',
+          'cidade_origem',
         ],
       },
     },
@@ -73,9 +88,18 @@ export const solTools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'ativar_acompanhante',
+      name: 'ativar_guia',
       description:
-        'Envia o link para ativar a Sol Acompanhante. Use quando o cliente pedir para ativar, quiser o acompanhamento em tempo real, perguntar sobre a Sol Acompanhante ou quiser saber como ativar.',
+        'Envia o link para ativar a Sol Guia. Use quando o cliente pedir para ativar, quiser o acompanhamento em tempo real, perguntar sobre a Sol Guia ou quiser saber como ativar.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pedir_foto_story',
+      description:
+        'Pede ao cliente uma foto para gerar uma imagem personalizada da viagem para compartilhar no Instagram/Stories. Use quando o cliente pedir explicitamente para gerar uma foto do Instagram, story, ou imagem da viagem.',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
@@ -110,6 +134,7 @@ export interface GerarRoteirArgs {
   nome_turista: string
   hotel_hospedagem: string
   horario_volta: string
+  cidade_origem: string
 }
 
 export interface RoteiroPersonalizadoArgs {

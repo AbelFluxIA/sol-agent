@@ -48,7 +48,7 @@ export const config = {
     phoneNumberId: process.env.META_PHONE_NUMBER_ID || '',
   },
 
-  // Link de pagamento para Sol Acompanhante (R$29,90)
+  // Link de pagamento para Sol Guia (R$29,90)
   companionPaymentLink: process.env.COMPANION_PAYMENT_LINK || '',
 
   paymentLinks: {

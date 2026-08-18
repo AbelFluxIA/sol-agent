@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { config } from '../config'
+import { log } from '../logger'
 
 interface GeneratePdfParams {
   travelerName: string
@@ -14,8 +15,6 @@ interface PdfResult {
 
 export async function generatePdf(params: GeneratePdfParams): Promise<PdfResult> {
   const { travelerName, destination, itineraryText } = params
-
-  console.log(`📄 Gerando PDF para ${travelerName} (${destination})...`)
 
   const response = await axios.post(
     `${config.supabase.url}/functions/v1/generate-pdf`,
@@ -41,7 +40,6 @@ export async function generatePdf(params: GeneratePdfParams): Promise<PdfResult>
     throw new Error('PDF gerado mas URL não retornada pela API')
   }
 
-  console.log(`✅ PDF gerado: ${pdfUrl}`)
-  if (shareCode) console.log(`🔗 Share code: ${shareCode}`)
+  log.info('pdf gerado', { step: 'generate-pdf', data: { pdfUrl, shareCode } })
   return { pdfUrl, shareCode }
 }

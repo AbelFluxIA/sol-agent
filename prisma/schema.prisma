@@ -20,6 +20,9 @@ model Conversation {
   arrivalDate     String?
   departureDate   String?
   arrivalTime     String?
+  departureTime   String?   // horário de volta no último dia, ex: "15:00"
+  originCity      String?   // cidade de onde parte, ex: "Recife - PE"
+  transportMode   String?   // "aviao" | "carro"
   interests       String?   // "Praia", "Gastronomia", etc
   travelStyle     String?   // "Conforto" ou "Aventura"
   groupType       String?   // "solo", "casal", "família com crianças", etc
@@ -72,6 +75,7 @@ model Itinerary {
   status        String    @default("pending")  // "pending" | "paid" | "generated" | "sent"
   
   rawItinerary  String?   @db.Text  // texto gerado pelo agente
+  storyPhotoUrl String?             // URL da foto enviada pelo cliente para o story
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

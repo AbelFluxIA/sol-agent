@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import { config } from '../config'
+import { log } from '../logger'
 import { getOrCreateConversation, getRecentMessages } from './database.service'
 
 const openai = new OpenAI({ apiKey: config.openai.apiKey })
@@ -57,7 +58,6 @@ async function getOrCreateMural(phone: string, name: string, destination: string
   const data = await supabasePost('photo_murals', {
     phone,
     title: `Viagem de ${name} para ${destination}`,
-    description: `Memórias da viagem de ${name} para ${destination}`,
     share_code: shareCode,
   })
 
@@ -138,7 +138,7 @@ Escreva um comentário curto (2-3 linhas) sobre esta foto como se você fosse a 
     await supabasePost('mural_photos', {
       mural_id: muralId,
       photo_url: photoUrl,
-      narrative_text: narrativeText,
+      caption: narrativeText,
       order_index: orderIndex,
     })
 
@@ -148,11 +148,11 @@ Escreva um comentário curto (2-3 linhas) sobre esta foto como se você fosse a 
     }
 
     const muralUrl = `https://iaturismo-two.vercel.app/mural/${shareCode}`
-    console.log(`📸 [${phone}] Foto ${orderIndex} adicionada ao mural: ${muralUrl}`)
+    log.info('foto adicionada ao mural', { phone, step: 'add-photo-mural', data: { orderIndex, muralUrl } })
 
-    return `${narrativeText}\n\n_📸 Registrei esse momento no seu mural de memórias: ${muralUrl}_`
+    return `📸 *Mural atualizado!* Abre aqui:\n${muralUrl}`
   } catch (err) {
-    console.error(`❌ Erro ao narrar foto do mural para ${phone}:`, err)
+    log.error('erro ao narrar foto do mural', err, { phone, step: 'add-photo-mural' })
     return null
   }
 }

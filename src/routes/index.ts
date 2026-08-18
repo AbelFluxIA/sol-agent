@@ -3,17 +3,67 @@ import OpenAI from 'openai'
 import { toFile } from 'openai'
 import { processMessage } from '../agents/sol.agent'
 import { generateAndSendItinerary } from '../agents/sol.agent'
+import { trackOperation } from '../shutdown'
 import fs from 'fs'
 import path from 'path'
 import { getOrCreateConversation, updateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit } from '../services/database.service'
-import { markAsRead, downloadMedia, sendWithTyping, sendHuman } from '../services/whatsapp.service'
+import { markAsRead, downloadMedia, sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
+import { watermarkImage, watermarkVideo } from '../services/watermark.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
-import { buildCompanionActivatedMessage } from '../prompts/sol.prompts'
+import { generateStoryImage, uploadStoryImage } from '../services/story.service'
+import { buildGuiaActivatedMessage, buildGuiaDeclineMessage, buildGuiaOfferMessage, buildGuiaButtonsText, buildReferralMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
 import { config } from '../config'
 
 const router = Router()
 const openai = new OpenAI({ apiKey: config.openai.apiKey })
+
+// Map de timers de story — se o usuário não mandar foto em 10 min, gera sem foto
+const storyTimers = new Map<string, NodeJS.Timeout>()
+
+async function runAutoStory(phone: string): Promise<void> {
+  storyTimers.delete(phone)
+  try {
+    const conv = await getOrCreateConversation(phone)
+    if (!conv.hasPaid) return
+    const latestIt = await getLatestItinerary(phone)
+    if (!latestIt || latestIt.storyPhotoUrl) return
+
+    const name = conv.name || 'Viajante'
+    const destination = conv.destination || ''
+    const storyBuffer = await generateStoryImage(name, destination, null)
+    if (!storyBuffer) return
+
+    const storyUrl = await uploadStoryImage(phone, storyBuffer)
+    if (!storyUrl) return
+
+    await updateItinerary(latestIt.id, { storyPhotoUrl: storyUrl })
+    await sendImage(phone, storyUrl, `Roteiro para ${destination} — ${name} ✈️`)
+
+    const referralCode = conv.referralCode || ''
+    if (referralCode && config.whatsappNumber) {
+      const { bodyText, ctaUrl } = buildReferralMessage(name, referralCode, config.whatsappNumber)
+      await sendHuman(phone, bodyText)
+      try {
+        await sendCtaButton(phone, 'Compartilhe com amigos:', 'Indicar agora', ctaUrl)
+      } catch {
+        await sendWithTyping(phone, `🔗 ${ctaUrl}`, 400)
+      }
+    }
+  } catch (err) {
+    log.error('erro no auto-story', err, { phone, step: 'story' })
+  }
+}
+
+async function sendPhotoRequest(phone: string): Promise<void> {
+  const msg = `📸 Uma última coisa: me manda uma foto sua e eu crio uma imagem personalizada da sua viagem pra você compartilhar nos stories!`
+  await sendWithTyping(phone, msg, 2000)
+
+  // Após 10 min sem foto, gera com destino apenas
+  const existing = storyTimers.get(phone)
+  if (existing) clearTimeout(existing)
+  storyTimers.set(phone, setTimeout(() => runAutoStory(phone), 10 * 60 * 1000))
+}
 
 // ----------------------------------------------------------------
 // Buffer de mensagens — acumula por 10s antes de processar
@@ -22,6 +72,8 @@ const openai = new OpenAI({ apiKey: config.openai.apiKey })
 const messageBuffer = new Map<string, string[]>()
 const messageTimers = new Map<string, NodeJS.Timeout>()
 const BUFFER_DELAY_MS = 8_000
+
+import { scheduleGuiaReminder, cancelGuiaReminder } from '../services/guia-reminder.service'
 
 function scheduleProcess(phone: string): void {
   const existing = messageTimers.get(phone)
@@ -64,8 +116,20 @@ async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<string
 // Se hasCompanion=true, também adiciona ao mural com narração da Sol
 // ----------------------------------------------------------------
 async function saveCustomerPhoto(phone: string, mediaId: string, hasCompanion: boolean): Promise<void> {
-  const { buffer, mimeType } = await downloadMedia(mediaId)
-  const ext = mimeType.includes('png') ? 'png' : 'jpg'
+  const { buffer: rawBuffer, mimeType } = await downloadMedia(mediaId)
+
+  // Aplica marca d'água da Sol antes de salvar
+  let buffer = rawBuffer
+  const today = new Date().toLocaleDateString('pt-BR')
+  try {
+    buffer = await watermarkImage(rawBuffer, today)
+    log.info('marca d\'água aplicada', { phone, step: 'watermark' })
+  } catch (err) {
+    log.warn('falha ao aplicar marca d\'água, salvando original', { phone, step: 'watermark', data: { error: (err as Error).message } })
+    buffer = rawBuffer
+  }
+
+  const ext = 'jpg' // watermark sempre retorna JPEG
   const fileName = `customer-photos/${phone}/${Date.now()}.${ext}`
 
   const supabaseUrl = config.supabase?.url || process.env.SUPABASE_URL!
@@ -131,10 +195,10 @@ router.get('/webhook/whatsapp', (req: Request, res: Response) => {
   const challenge = req.query['hub.challenge']
 
   if (mode === 'subscribe' && token === config.meta.verifyToken) {
-    console.log('✅ Webhook Meta verificado com sucesso!')
+    log.info('webhook meta verificado', { step: 'webhook-verify' })
     res.status(200).send(challenge)
   } else {
-    console.warn('⚠️ Verificação Meta falhou — token incorreto')
+    log.warn('verificação meta falhou — token incorreto', { step: 'webhook-verify' })
     res.status(403).json({ error: 'Forbidden' })
   }
 })
@@ -183,23 +247,97 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
       if (!mediaId) return
       log.info('foto recebida', { phone, step: 'save-photo' })
       const convForPhoto = await getOrCreateConversation(phone)
+
+      // Story photo flow: user paid or guia active, itinerary exists, no story yet
+      if (convForPhoto.hasPaid || convForPhoto.hasCompanion) {
+        const latestItinerary = await getLatestItinerary(phone)
+        if (latestItinerary && !latestItinerary.storyPhotoUrl) {
+          saveCustomerPhoto(phone, mediaId, convForPhoto.hasCompanion).catch(err =>
+            log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
+          )
+          const name = convForPhoto.name || 'Viajante'
+          const destination = convForPhoto.destination || ''
+          try {
+            const { buffer: userBuffer } = await downloadMedia(mediaId)
+            await sendWithTyping(phone, 'Recebida! Montando sua foto personalizada... ✨', 600)
+            // Cancela o timer de auto-story pois o usuário mandou a foto a tempo
+            const pendingTimer = storyTimers.get(phone)
+            if (pendingTimer) { clearTimeout(pendingTimer); storyTimers.delete(phone) }
+
+            const storyBuffer = await generateStoryImage(name, destination, userBuffer)
+            if (storyBuffer) {
+              const storyUrl = await uploadStoryImage(phone, storyBuffer)
+              if (storyUrl) {
+                await updateItinerary(latestItinerary.id, { storyPhotoUrl: storyUrl })
+                await sendImage(phone, storyUrl, `Roteiro para ${destination} — ${name} ✈️`)
+                const referralCode = convForPhoto.referralCode || ''
+                if (referralCode && config.whatsappNumber) {
+                  const { bodyText, ctaUrl } = buildReferralMessage(name, referralCode, config.whatsappNumber)
+                  await sendHuman(phone, bodyText)
+                  try {
+                    await sendCtaButton(phone, 'Compartilhe com amigos:', 'Indicar agora', ctaUrl)
+                  } catch {
+                    await sendWithTyping(phone, `🔗 ${ctaUrl}`, 400)
+                  }
+                }
+              } else {
+                await sendWithTyping(phone, 'Foto recebida! Tive um probleminha ao gerar a imagem — tenta mandar de novo daqui a pouco 😅', 800)
+              }
+            } else {
+              await sendWithTyping(phone, 'Foto recebida! Tive um probleminha ao gerar a imagem — tenta mandar de novo daqui a pouco 😅', 800)
+            }
+          } catch (err) {
+            log.error('erro no fluxo de story', err, { phone, step: 'story' })
+            await sendWithTyping(phone, 'Foto recebida! Tive um probleminha ao gerar a imagem — tenta mandar de novo daqui a pouco 😅', 800)
+          }
+          return
+        }
+      }
+
       if (convForPhoto.hasCompanion) {
-        // Companion ativa: narra a foto e adiciona ao mural
+        // Guia ativa: narra a foto e adiciona ao mural
         saveCustomerPhoto(phone, mediaId, true).catch(err =>
           log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
         )
       } else {
-        // Sem companion: salva silenciosamente + manda ack se já tem roteiro
+        // Sem guia: salva silenciosamente + manda ack se já tem roteiro
         saveCustomerPhoto(phone, mediaId, false).catch(err =>
           log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
         )
         if (convForPhoto.hasPaid) {
           await sendWithTyping(
             phone,
-            'Foto recebida e salva 📸 Com a Sol Acompanhante eu narro cada momento e monto um mural de memórias da sua viagem. Quer ativar?',
+            'Foto recebida e salva 📸 Com a Sol Guia eu narro cada momento e monto um mural de memórias da sua viagem. Quer ativar?',
             800
           )
         }
+      }
+      return
+    } else if (type === 'video') {
+      const mediaId = messageObj.video?.id
+      if (!mediaId) return
+      log.info('vídeo recebido', { phone, step: 'watermark-video' })
+      const conv = await getOrCreateConversation(phone)
+      if (conv.hasPaid || conv.hasCompanion) {
+        ;(async () => {
+          try {
+            const { buffer: rawBuffer, mimeType } = await downloadMedia(mediaId)
+            const { buffer: wmBuffer } = await watermarkVideo(rawBuffer, mimeType)
+            const fileName = `customer-photos/${phone}/${Date.now()}.mp4`
+            const supabaseUrl = config.supabase?.url || process.env.SUPABASE_URL!
+            const serviceKey  = (config.supabase as any)?.serviceKey || process.env.SUPABASE_SERVICE_KEY!
+            const uploadRes = await fetch(`${supabaseUrl}/storage/v1/object/${fileName}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'video/mp4' },
+              body: wmBuffer,
+            })
+            if (uploadRes.ok) {
+              log.info('vídeo com marca d\'água salvo', { phone, step: 'watermark-video', data: { fileName } })
+            }
+          } catch (err) {
+            log.error('erro ao aplicar marca d\'água no vídeo', err, { phone, step: 'watermark-video' })
+          }
+        })()
       }
       return
     } else if (type === 'location') {
@@ -207,8 +345,48 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
       const lng = messageObj.location?.longitude
       if (!lat || !lng) return
       log.info('localização recebida', { phone, data: { lat, lng } })
-      // Encaminha como mensagem de texto para o agente processar (modo acompanhante)
       text = `[LOCALIZAÇÃO: lat=${lat}, lng=${lng}]`
+    } else if (type === 'interactive') {
+      const buttonReply = messageObj.interactive?.button_reply
+      if (!buttonReply) return
+      const { id: buttonId } = buttonReply
+      log.info('botão clicado', { phone, data: { buttonId } })
+
+      if (buttonId === 'guia_yes') {
+        cancelGuiaReminder(phone) // clicou — cancela o lembrete
+        const conv = await getOrCreateConversation(phone)
+        if (conv.hasCompanion) {
+          await sendWithTyping(phone, 'A Sol Guia já está ativa para você! É só mandar sua localização ou perguntar qualquer coisa sobre o roteiro. ☀️', 600)
+          return
+        }
+        if (!config.companionPaymentLink) {
+          await updateConversation(phone, { hasCompanion: true })
+          const activationMsg = buildGuiaActivatedMessage(conv.name || 'você')
+          await sendHuman(phone, activationMsg)
+          await sendPhotoRequest(phone)
+          return
+        }
+        const payText = 'Perfeito! Clica no botão abaixo para ativar:'
+        try {
+          await sendCtaButton(phone, payText, 'Ativar agora', config.companionPaymentLink)
+        } catch {
+          await sendWithTyping(phone, `${payText}\n\n${config.companionPaymentLink}`, 400)
+        }
+        await sendPhotoRequest(phone)
+      } else if (buttonId === 'guia_no') {
+        cancelGuiaReminder(phone) // clicou — cancela o lembrete
+        const conv = await getOrCreateConversation(phone)
+        const name = conv.name || 'você'
+        const referralCode = conv.referralCode || ''
+        if (referralCode && config.whatsappNumber) {
+          const declineMsg = buildGuiaDeclineMessage(name, referralCode, config.whatsappNumber)
+          await sendHuman(phone, declineMsg)
+        } else {
+          await sendWithTyping(phone, `Tudo bem, *${name}*! Se mudar de ideia durante a viagem é só me chamar aqui. Boa viagem ☀️`, 800)
+        }
+        await sendPhotoRequest(phone)
+      }
+      return
     } else {
       log.warn('tipo de mensagem não suportado', { phone, data: { type } })
       return
@@ -217,6 +395,22 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
     if (!text?.trim()) return
 
     log.info('texto recebido', { phone, data: { preview: text.substring(0, 80) } })
+
+    cancelGuiaReminder(phone) // qualquer mensagem cancela o lembrete pendente
+
+    // Comando /new — apaga histórico e reinicia do zero
+    if (text.trim().toLowerCase() === '/new') {
+      const timer = messageTimers.get(phone)
+      if (timer) clearTimeout(timer)
+      messageTimers.delete(phone)
+      messageBuffer.delete(phone)
+      await resetConversation(phone)
+      log.info('conversa reiniciada via /new', { phone })
+      processMessage(phone, 'oi').catch(err =>
+        log.error('erro ao reiniciar conversa via /new', err, { phone })
+      )
+      return
+    }
 
     // Acumula no buffer e reinicia o timer de 10s
     const buffer = messageBuffer.get(phone) ?? []
@@ -276,7 +470,7 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
       }
     }
 
-    generateAndSendItinerary(phone).catch(err => {
+    trackOperation('generate-itinerary', () => generateAndSendItinerary(phone)).catch(err => {
       log.error('erro ao gerar roteiro pós-pagamento', err, { phone })
     })
   } catch (error) {
@@ -286,17 +480,17 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
 })
 
 // ----------------------------------------------------------------
-// POST /webhook/payment-companion — confirmação de pagamento da Sol Acompanhante
+// POST /webhook/payment-guia — confirmação de pagamento da Sol Guia
 // ----------------------------------------------------------------
-router.post('/webhook/payment-companion', async (req: Request, res: Response) => {
+router.post('/webhook/payment-guia', async (req: Request, res: Response) => {
   try {
     const body = req.body
-    log.info('webhook pagamento companion recebido', { data: body })
+    log.info('webhook pagamento guia recebido', { data: body })
     res.status(200).json({ ok: true })
 
     const status = body?.payment?.status || body?.status
     if (status !== 'PAID' && status !== 'approved' && status !== 'paid') {
-      log.info('companion payment ignorado', { data: { status } })
+      log.info('guia payment ignorado', { data: { status } })
       return
     }
 
@@ -306,21 +500,21 @@ router.post('/webhook/payment-companion', async (req: Request, res: Response) =>
       body?.customer?.phone
 
     if (!phone) {
-      log.error('telefone não encontrado no webhook companion', new Error('missing phone'), { data: body })
+      log.error('telefone não encontrado no webhook guia', new Error('missing phone'), { data: body })
       return
     }
 
-    log.info('companion payment confirmado', { phone })
+    log.info('guia payment confirmado', { phone })
 
     await updateConversation(phone, { hasCompanion: true })
 
     const conv = await getOrCreateConversation(phone)
     const name = conv.name || 'você'
-    const msg = buildCompanionActivatedMessage(name)
+    const msg = buildGuiaActivatedMessage(name)
     await sendHuman(phone, msg)
 
   } catch (error) {
-    log.error('erro no webhook companion', error, {})
+    log.error('erro no webhook guia', error, {})
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -444,7 +638,7 @@ router.post('/internal/generate-itinerary', async (req: Request, res: Response) 
   const { phone } = req.body
   if (!phone) return res.status(400).json({ error: 'phone obrigatório' })
   res.json({ ok: true, message: 'Geração iniciada' })
-  generateAndSendItinerary(phone).catch(err => {
+  trackOperation('generate-itinerary', () => generateAndSendItinerary(phone)).catch(err => {
     log.error('erro ao gerar roteiro manual', err, { phone })
   })
 })

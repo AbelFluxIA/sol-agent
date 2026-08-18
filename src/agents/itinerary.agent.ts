@@ -20,6 +20,8 @@ interface GenerateItineraryParams {
   marine: MarineData | null
   forceDays?: number
   departureTime?: string | null
+  originCity?: string
+  transportMode?: string
 }
 
 export async function classifyDays(arrivalDate: string, departureDate: string): Promise<ValidDays> {
@@ -55,18 +57,28 @@ export async function generateItineraryText(params: GenerateItineraryParams): Pr
     marine,
     forceDays,
     departureTime,
+    originCity,
+    transportMode,
   } = params
 
   const daysOfWeek = getDaysOfWeek(arrivalDate, departureDate)
   const hasMonday = daysOfWeek.includes('Segunda')
 
-  // Instrução para o último dia baseada no horário de volta
+  // Instrução para o último dia baseada no meio de transporte e horário
   function buildLastDayInstruction(): string {
     if (!departureTime || departureTime === 'não informado') return ''
     const [h] = departureTime.split(':').map(Number)
-    if (h < 12) return `⚠️ ÚLTIMO DIA — viagem de volta às ${departureTime}: não inclua atividades, apenas check-out e traslado ao aeroporto/rodoviária.`
-    if (h < 18) return `⚠️ ÚLTIMO DIA — viagem de volta às ${departureTime}: inclua apenas UMA atividade pela manhã (termine até ${h - 1}h) e traslado.`
-    return `⚠️ ÚLTIMO DIA — viagem de volta às ${departureTime}: inclua UMA atividade pela manhã e UMA à tarde (termine até ${h - 2}h) antes do traslado.`
+    const isFlying = !transportMode || transportMode === 'aviao'
+    // Avião: 5h de antecedência (2h no aeroporto + 3h para organizar e deslocar)
+    // Carro: 2.5h de antecedência (organizar malas + saída)
+    const bufferH = isFlying ? 5 : 3
+    const cutoffH = h - bufferH
+    const transport = isFlying ? 'voo' : 'viagem de carro'
+    const destination = isFlying ? 'aeroporto' : 'saída'
+
+    if (cutoffH <= 7) return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: não inclua atividades — apenas check-out e traslado ao ${destination}.`
+    if (cutoffH <= 12) return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: UMA atividade pela manhã (termine até ${cutoffH}h), depois traslado ao ${destination}.`
+    return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: manhã e UMA atividade à tarde (termine até ${cutoffH}h), depois traslado ao ${destination}.`
   }
   const lastDayInstruction = buildLastDayInstruction()
 
@@ -86,11 +98,13 @@ Gere um roteiro completo para este turista:
 DADOS DO TURISTA:
 - Nome: ${name}
 - Destino: ${destination}
+${originCity ? `- Cidade de origem: ${originCity}` : ''}
 - Data de chegada: ${arrivalDate} (${daysOfWeek[0]}) às ${arrivalTime}
 - Data de saída: ${departureDate} (${daysOfWeek[daysOfWeek.length - 1]})
 - Dias da semana: ${daysOfWeek.join(', ')}
 - Perfil: ${touristProfile}
 - Grupo: ${groupType}
+${transportMode ? `- Transporte de volta: ${transportMode === 'aviao' ? 'avião (reservar 5h antes da partida)' : 'carro (reservar 3h antes da partida)'}` : ''}
 ${forceDays ? `- Dias de roteiro: ${forceDays}` : ''}
 ${hasMonday ? '⚠️ SEGUNDA-FEIRA no roteiro — use apenas locais que abrem na segunda.' : ''}
 ${lastDayInstruction}

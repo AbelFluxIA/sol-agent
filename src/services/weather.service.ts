@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { WeatherData, MarineData } from '../types'
+import { log } from '../logger'
 
 export interface Coordinates {
   lat: number
@@ -15,7 +16,7 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 3, delayMs = 2000):
     } catch (err: any) {
       const isLast = i === attempts - 1
       if (isLast) throw err
-      console.warn(`⚠️ Tentativa ${i + 1} falhou (${err?.code || err?.message}), tentando novamente em ${delayMs}ms...`)
+      log.warn(`tentativa ${i + 1} falhou, retry em ${delayMs}ms`, { step: 'weather-retry', data: { error: err?.code || err?.message } })
       await new Promise(r => setTimeout(r, delayMs))
     }
   }
@@ -36,7 +37,7 @@ export async function geocodeDestination(destination: string): Promise<Coordinat
     })
     const result = data?.results?.[0]
     if (!result) throw new Error(`Destino "${query}" não encontrado para geocodificação`)
-    console.log(`📍 Geocodificado "${query}" → lat:${result.latitude} lon:${result.longitude}`)
+    log.info('geocodificado', { step: 'geocode', data: { query, lat: result.latitude, lon: result.longitude } })
     return { lat: result.latitude, lon: result.longitude }
   })
 }
@@ -92,18 +93,17 @@ export async function getWeatherAndMarine(
   endDate: string,
   destination: string
 ): Promise<{ weather: WeatherData | null; marine: MarineData | null }> {
-  console.log(`🌤️ Buscando clima de "${destination}" de ${startDate} até ${endDate}...`)
+  log.info('buscando clima', { step: 'weather-fetch', data: { destination, startDate, endDate } })
   try {
     const coords = await geocodeDestination(destination)
     const [weather, marine] = await Promise.all([
       getWeatherData(startDate, endDate, coords),
       getMarineData(startDate, endDate, coords),
     ])
-    if (marine) console.log('🌊 Dados marinhos disponíveis')
-    else console.log('🏔️ Destino sem dados marinhos (interior)')
+    log.info(marine ? 'dados marinhos disponíveis' : 'destino sem dados marinhos (interior)', { step: 'weather-fetch', data: { destination } })
     return { weather, marine }
   } catch (err: any) {
-    console.warn(`⚠️ Clima indisponível para "${destination}": ${err.message} — gerando roteiro sem dados de clima`)
+    log.warn('clima indisponível — gerando roteiro sem dados', { step: 'weather-fetch', data: { destination, error: err.message } })
     return { weather: null, marine: null }
   }
 }
