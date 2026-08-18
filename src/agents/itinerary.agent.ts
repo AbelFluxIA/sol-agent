@@ -5,6 +5,7 @@ import { log } from '../logger'
 import { buildItinerarySystemPrompt, buildDaysClassifierPrompt } from '../prompts/sol.prompts'
 import { WeatherData, MarineData, VALID_DAYS, ValidDays } from '../types'
 import { getDaysOfWeek } from '../services/weather.service'
+import { logApiUsage } from '../services/usage.service'
 
 const openai = new OpenAI({ apiKey: config.openai.apiKey })
 
@@ -22,9 +23,11 @@ interface GenerateItineraryParams {
   departureTime?: string | null
   originCity?: string
   transportMode?: string
+  phone?: string
+  itineraryId?: string
 }
 
-export async function classifyDays(arrivalDate: string, departureDate: string): Promise<ValidDays> {
+export async function classifyDays(arrivalDate: string, departureDate: string, phone?: string): Promise<ValidDays> {
   const prompt = buildDaysClassifierPrompt(arrivalDate, departureDate)
 
   const response = await openai.chat.completions.create({
@@ -32,6 +35,15 @@ export async function classifyDays(arrivalDate: string, departureDate: string): 
     messages: [{ role: 'user', content: prompt }],
     max_tokens: 5,
     temperature: 0,
+  })
+
+  logApiUsage({
+    phone,
+    provider: 'openai',
+    model: config.openai.model,
+    callType: 'classify_days',
+    inputTokens: response.usage?.prompt_tokens ?? 0,
+    outputTokens: response.usage?.completion_tokens ?? 0,
   })
 
   const raw = response.choices[0]?.message?.content?.trim() || '1'
@@ -59,6 +71,8 @@ export async function generateItineraryText(params: GenerateItineraryParams): Pr
     departureTime,
     originCity,
     transportMode,
+    phone,
+    itineraryId,
   } = params
 
   const daysOfWeek = getDaysOfWeek(arrivalDate, departureDate)
@@ -169,6 +183,19 @@ Gere o roteiro completo formatado para WhatsApp.
         const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text
         if (!text) throw new Error('Gemini não retornou texto no roteiro')
         log.info('gemini concluiu', { step: 'gemini-generate', durationMs: Date.now() - start, data: { model, chars: text.length } })
+
+        const usage = response.data?.usageMetadata
+        logApiUsage({
+          phone,
+          itineraryId,
+          provider: 'google',
+          model,
+          callType: 'itinerary',
+          inputTokens: (usage?.promptTokenCount ?? 0) + (usage?.toolUsePromptTokenCount ?? 0),
+          outputTokens: usage?.candidatesTokenCount ?? 0,
+          thinkingTokens: usage?.thoughtsTokenCount ?? 0,
+        })
+
         return text
       } catch (err: any) {
         lastError = err
@@ -193,7 +220,7 @@ Gere o roteiro completo formatado para WhatsApp.
 // Busca pontual com grounding real (Google Search) para perguntas ao vivo no modo Sol Guia.
 // Reaproveita a mesma infra de generateItineraryText, mas com prompt curto e sem retry pesado
 // (latência importa mais aqui do que na geração do roteiro, que roda 1x só).
-export async function searchGroundedAnswer(query: string, contextHint?: string): Promise<string | null> {
+export async function searchGroundedAnswer(query: string, contextHint?: string, phone?: string): Promise<string | null> {
   const prompt = `Você é a Sol, assistente de viagem, respondendo DIRETAMENTE ao turista pelo WhatsApp (fale com "você", nunca em terceira pessoa como "o cliente"). Use Google Search para checar informação ATUAL e real — não invente nomes de estabelecimentos. Cite NO MÁXIMO 3 opções reais e confirmadas, sem agrupar em categorias/subtítulos — só uma lista corrida curta. Tom direto e informal, poucas linhas, sem markdown pesado. Se não encontrar nada confiável, diga isso claramente em vez de inventar.
 NUNCA inclua links diretos de site, Facebook, Instagram ou perfil de estabelecimento — esses ficam desatualizados e quebram com frequência. Se for útil dar um link, use APENAS um link de busca do Google Maps neste formato exato: https://www.google.com/maps/search/?api=1&query=Nome+Do+Local+Cidade (substituindo espaços por +) — esse nunca quebra porque é uma busca, não um link direto ao negócio.
 ${contextHint ? `\nContexto: ${contextHint}\n` : ''}
@@ -214,6 +241,17 @@ Pergunta do turista: ${query}`
       { timeout: 20_000 }
     )
     const candidate = response.data?.candidates?.[0]
+    const usage = response.data?.usageMetadata
+    logApiUsage({
+      phone,
+      provider: 'google',
+      model: config.google.model,
+      callType: 'grounded_search',
+      inputTokens: (usage?.promptTokenCount ?? 0) + (usage?.toolUsePromptTokenCount ?? 0),
+      outputTokens: usage?.candidatesTokenCount ?? 0,
+      thinkingTokens: usage?.thoughtsTokenCount ?? 0,
+    })
+
     if (candidate?.finishReason === 'MAX_TOKENS' && !candidate?.content?.parts?.[0]?.text) {
       log.warn('busca com grounding truncada sem texto', { step: 'grounded-search' })
       return null

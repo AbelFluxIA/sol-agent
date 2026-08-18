@@ -90,3 +90,26 @@ model Itinerary {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// Registro de custo de cada chamada de API (OpenAI/Gemini) — base do painel de custos
+model ApiUsage {
+  id             String   @id @default(cuid())
+  phone          String?  // sem relação obrigatória — logging nunca deve falhar por causa de FK
+  conversationId String?
+  itineraryId    String?
+
+  provider String // "openai" | "google"
+  model    String // ex: "gpt-4.1-mini", "gemini-2.5-flash"
+  callType String // "chat" | "itinerary" | "grounded_search" | "classify_days" | "track_visited"
+
+  inputTokens    Int
+  outputTokens   Int
+  thinkingTokens Int   @default(0) // tokens de raciocínio do Gemini, cobrados como output
+  costUsd        Float
+
+  createdAt DateTime @default(now())
+
+  @@index([phone])
+  @@index([createdAt])
+  @@index([callType])
+}

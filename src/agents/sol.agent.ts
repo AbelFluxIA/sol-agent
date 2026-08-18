@@ -24,6 +24,7 @@ import {
 } from '../services/database.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons } from '../services/whatsapp.service'
 import { checkAndDeductCredit } from '../services/credits.service'
+import { logApiUsage } from '../services/usage.service'
 import { getWeatherAndMarine } from '../services/weather.service'
 import { generateItineraryText, classifyDays, searchGroundedAnswer } from './itinerary.agent'
 import { generatePdf } from '../services/pdf.service'
@@ -100,6 +101,16 @@ async function trackVisitedPlaces(phone: string, userMessage: string): Promise<v
     ],
     max_tokens: 30,
     temperature: 0,
+  })
+
+  logApiUsage({
+    phone,
+    itineraryId: itinerary.id,
+    provider: 'openai',
+    model: config.openai.model,
+    callType: 'track_visited',
+    inputTokens: detect.usage?.prompt_tokens ?? 0,
+    outputTokens: detect.usage?.completion_tokens ?? 0,
   })
 
   const local = detect.choices[0]?.message?.content?.trim()
@@ -233,6 +244,16 @@ export async function processMessage(
 
   const message = response.choices[0]?.message
 
+  logApiUsage({
+    phone,
+    conversationId: conversation.id,
+    provider: 'openai',
+    model: config.openai.model,
+    callType: 'chat',
+    inputTokens: response.usage?.prompt_tokens ?? 0,
+    outputTokens: response.usage?.completion_tokens ?? 0,
+  })
+
   // 5. Se a Sol quer chamar uma tool
   if (message?.tool_calls && message.tool_calls.length > 0) {
     const toolCall = message.tool_calls[0]
@@ -344,7 +365,7 @@ async function handlePedirFotoStory(phone: string, channel: 'whatsapp' | 'app' =
 async function handleBuscarSugestaoConfiavel(phone: string, args: BuscarSugestaoArgs, channel: 'whatsapp' | 'app' = 'whatsapp'): Promise<string> {
   const conversation = await getOrCreateConversation(phone)
   const contextHint = conversation.destination ? `Cliente está em viagem em ${conversation.destination}.` : undefined
-  const result = await searchGroundedAnswer(args.pergunta, contextHint)
+  const result = await searchGroundedAnswer(args.pergunta, contextHint, phone)
   const reply = result || 'Não consegui confirmar isso agora com segurança — tenta perguntar de um jeito mais específico ou dá uma olhada direto no Google Maps por perto.'
   await saveMessage(phone, 'assistant', reply)
   if (channel === 'whatsapp') await sendWithTyping(phone, reply, 800)
@@ -389,7 +410,7 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   })
 
   // Descobre quantos dias de roteiro
-  const days = await classifyDays(data_chegada, data_saida)
+  const days = await classifyDays(data_chegada, data_saida, phone)
 
   // Verifica e desconta crédito grátis via Edge Function
   const hasFreeCredit = await checkAndDeductCredit(phone, resolvedName)
@@ -540,8 +561,11 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
 
     // Descobre número de dias (ou usa o forçado)
     const days = forceDays || (await log.timed(phone, 'classify-days', () =>
-      classifyDays(arrivalDate, departureDate)
+      classifyDays(arrivalDate, departureDate, phone)
     ))
+
+    // Busca o Itinerary já criado (para linkar o custo da geração a ele)
+    const latestIt = await getLatestItinerary(phone)
 
     // Gera o texto do roteiro
     const itineraryText = await log.timed(phone, 'gemini-itinerary', () =>
@@ -559,11 +583,12 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
         departureTime,
         originCity: originCity || undefined,
         transportMode: transportMode || undefined,
+        phone,
+        itineraryId: latestIt?.id,
       })
     )
 
     // Salva texto no banco para a Sol Guia usar como contexto
-    const latestIt = await getLatestItinerary(phone)
     if (latestIt) {
       await updateItinerary(latestIt.id, { rawItinerary: itineraryText })
     }
