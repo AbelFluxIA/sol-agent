@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Conversation {
+  id             String      @id @default(cuid())
+  phone          String      @unique
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  name           String?
+  arrivalDate    String?
+  departureDate  String?
+  arrivalTime    String?
+  interests      String?
+  travelStyle    String?
+  groupType      String?
+  touristProfile String?
+  phase          Int         @default(1)
+  onboardingStep Int         @default(0)
+  hasPaid        Boolean     @default(false)
+  freeCredits    Int         @default(0)
+  destination    String?
+  referralCode   String?     @unique
+  referredBy     String?
+  hasCompanion   Boolean     @default(false)
+  itineraries    Itinerary[]
+  messages       Message[]
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  role           String
+  content        String
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model Itinerary {
+  id             String       @id @default(cuid())
+  conversationId String
+  days           Int
+  pdfUrl         String?
+  paymentId      String?
+  status         String       @default("pending")
+  rawItinerary   String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+model customer_photos {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  phone             String
+  photo_url         String?
+  whatsapp_media_id String?
+  created_at        DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+model customers {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  phone           String    @unique
+  name            String?
+  destination     String?
+  arrival_date    String?
+  departure_date  String?
+  arrival_time    String?
+  group_type      String?
+  tourist_profile String?
+  hotel           String?
+  interests       String[]
+  photos          String[]
+  free_credits    Int       @default(2)
+  created_at      DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model generated_itineraries {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title               String?
+  destination         String?
+  traveler_name       String?
+  phone               String?
+  pdf_url             String?
+  file_name           String?
+  text_length         Int?
+  text_content        String?
+  share_code          String?   @unique @db.Uuid
+  interest_focus      String?
+  interest_categories String[]
+  created_at          DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+model mural_photos {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  mural_id     String?       @db.Uuid
+  photo_url    String?
+  caption      String?
+  created_at   DateTime?     @default(now()) @db.Timestamptz(6)
+  photo_murals photo_murals? @relation(fields: [mural_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model photo_murals {
+  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  phone        String?
+  title        String?
+  share_code   String?        @unique
+  created_at   DateTime?      @default(now()) @db.Timestamptz(6)
+  mural_photos mural_photos[]
+}
