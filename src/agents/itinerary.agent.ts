@@ -174,9 +174,9 @@ Gere o roteiro completo formatado para WhatsApp.
 // Reaproveita a mesma infra de generateItineraryText, mas com prompt curto e sem retry pesado
 // (latência importa mais aqui do que na geração do roteiro, que roda 1x só).
 export async function searchGroundedAnswer(query: string, contextHint?: string): Promise<string | null> {
-  const prompt = `Responda a pergunta abaixo usando Google Search para checar informação ATUAL e real — não invente nomes de estabelecimentos. Cite 2-4 opções reais e confirmadas, formato curto para WhatsApp (sem markdown pesado). Se não encontrar nada confiável, diga isso claramente em vez de inventar.
+  const prompt = `Você é a Sol, assistente de viagem, respondendo DIRETAMENTE ao turista pelo WhatsApp (fale com "você", nunca em terceira pessoa como "o cliente"). Use Google Search para checar informação ATUAL e real — não invente nomes de estabelecimentos. Cite NO MÁXIMO 3 opções reais e confirmadas, sem agrupar em categorias/subtítulos — só uma lista corrida curta. Tom direto e informal, poucas linhas, sem markdown pesado. Se não encontrar nada confiável, diga isso claramente em vez de inventar.
 ${contextHint ? `\nContexto: ${contextHint}\n` : ''}
-Pergunta: ${query}`
+Pergunta do turista: ${query}`
 
   try {
     const response = await axios.post(
@@ -184,11 +184,20 @@ Pergunta: ${query}`
       {
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         tools: [{ google_search: {} }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 500 },
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 800,
+          thinkingConfig: { thinkingBudget: 0 }, // resposta rápida e curta — não precisa de raciocínio estendido
+        },
       },
       { timeout: 20_000 }
     )
-    return response.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
+    const candidate = response.data?.candidates?.[0]
+    if (candidate?.finishReason === 'MAX_TOKENS' && !candidate?.content?.parts?.[0]?.text) {
+      log.warn('busca com grounding truncada sem texto', { step: 'grounded-search' })
+      return null
+    }
+    return candidate?.content?.parts?.[0]?.text ?? null
   } catch (err) {
     log.warn('busca com grounding falhou', { step: 'grounded-search', data: { error: (err as Error).message } })
     return null
