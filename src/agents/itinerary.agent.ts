@@ -9,6 +9,11 @@ import { logApiUsage } from '../services/usage.service'
 
 const openai = new OpenAI({ apiKey: config.openai.apiKey })
 
+// Ver mesma lógica em sol.agent.ts — modelos reasoning exigem/aceitam esse parâmetro, outros rejeitam.
+const reasoningEffortParam = config.openai.reasoningEffort
+  ? { reasoning_effort: config.openai.reasoningEffort as any }  // SDK ainda não tipa 'none', mas a API aceita
+  : {}
+
 interface GenerateItineraryParams {
   name: string
   destination: string
@@ -33,8 +38,9 @@ export async function classifyDays(arrivalDate: string, departureDate: string, p
   const response = await openai.chat.completions.create({
     model: config.openai.model,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 5,
+    max_completion_tokens: 5,
     temperature: 0,
+    ...reasoningEffortParam,
   })
 
   logApiUsage({

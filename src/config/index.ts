@@ -13,6 +13,9 @@ export const config = {
   openai: {
     apiKey: required('OPENAI_API_KEY'),
     model: process.env.OPENAI_MODEL || 'gpt-5.4-mini',
+    // Modelos "reasoning" (ex: gpt-5.6-luna) exigem esse parâmetro quando usados com function tools
+    // no endpoint /v1/chat/completions — deixar undefined em modelos que não o suportam (ex: gpt-4.1-mini)
+    reasoningEffort: process.env.OPENAI_REASONING_EFFORT || undefined,
   },
 
   // Meta WhatsApp Business API (API oficial)

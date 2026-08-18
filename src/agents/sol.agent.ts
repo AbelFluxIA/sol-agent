@@ -43,6 +43,12 @@ import { PRICES, ValidDays } from '../types'
 
 const openai = new OpenAI({ apiKey: config.openai.apiKey })
 
+// Modelos "reasoning" (ex: gpt-5.6-luna) exigem esse parâmetro pra usar function tools no /v1/chat/completions.
+// Modelos sem reasoning (ex: gpt-4.1-mini) rejeitam o parâmetro se ele for enviado — por isso é condicional.
+const reasoningEffortParam = config.openai.reasoningEffort
+  ? { reasoning_effort: config.openai.reasoningEffort as any }  // SDK ainda não tipa 'none', mas a API aceita
+  : {}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -99,8 +105,9 @@ async function trackVisitedPlaces(phone: string, userMessage: string): Promise<v
       },
       { role: 'user', content: userMessage },
     ],
-    max_tokens: 30,
+    max_completion_tokens: 30,
     temperature: 0,
+    ...reasoningEffortParam,
   })
 
   logApiUsage({
@@ -238,8 +245,9 @@ export async function processMessage(
     ],
     tools: solTools,
     tool_choice: 'auto',
-    max_tokens: 1000,
+    max_completion_tokens: 1000,
     temperature: 1.2, // um pouco mais criativo para parecer mais humano
+    ...reasoningEffortParam,
   })
 
   const message = response.choices[0]?.message
