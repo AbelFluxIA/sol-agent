@@ -169,3 +169,28 @@ Gere o roteiro completo formatado para WhatsApp.
   }
   throw lastError
 }
+
+// Busca pontual com grounding real (Google Search) para perguntas ao vivo no modo Sol Guia.
+// Reaproveita a mesma infra de generateItineraryText, mas com prompt curto e sem retry pesado
+// (latência importa mais aqui do que na geração do roteiro, que roda 1x só).
+export async function searchGroundedAnswer(query: string, contextHint?: string): Promise<string | null> {
+  const prompt = `Responda a pergunta abaixo usando Google Search para checar informação ATUAL e real — não invente nomes de estabelecimentos. Cite 2-4 opções reais e confirmadas, formato curto para WhatsApp (sem markdown pesado). Se não encontrar nada confiável, diga isso claramente em vez de inventar.
+${contextHint ? `\nContexto: ${contextHint}\n` : ''}
+Pergunta: ${query}`
+
+  try {
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${config.google.model}:generateContent?key=${config.google.apiKey}`,
+      {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        tools: [{ google_search: {} }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 500 },
+      },
+      { timeout: 20_000 }
+    )
+    return response.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null
+  } catch (err) {
+    log.warn('busca com grounding falhou', { step: 'grounded-search', data: { error: (err as Error).message } })
+    return null
+  }
+}

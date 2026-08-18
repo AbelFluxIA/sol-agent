@@ -106,6 +106,24 @@ NUNCA escreva apenas "viajante econômico" sem especificar o tipo de experiênci
   {
     type: 'function',
     function: {
+      name: 'buscar_sugestao_confiavel',
+      description:
+        'Busca em tempo real (Google Search) por lugares/estabelecimentos reais e atualmente abertos perto do cliente. SEMPRE use em vez de responder de memória quando o cliente pedir recomendação de lugar específico em tempo real no modo Sol Guia (ex: "onde tem opção coberta perto", "restaurante aberto agora perto daqui"). NÃO use para perguntas sobre o roteiro já planejado.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pergunta: {
+            type: 'string',
+            description: 'A pergunta do cliente reformulada como busca, incluindo destino/coordenadas se souber. Ex: "opções cobertas para chuva perto do Centro Histórico de João Pessoa"',
+          },
+        },
+        required: ['pergunta'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'roteiro_personalizado',
       description:
         'Gera novo link de pagamento com número de dias específico. Use quando o cliente quiser mudar o número de dias — tanto ANTES de pagar (fase 4) quanto depois (fase 5).',
@@ -139,4 +157,8 @@ export interface GerarRoteirArgs {
 
 export interface RoteiroPersonalizadoArgs {
   dias_roteiro: number
+}
+
+export interface BuscarSugestaoArgs {
+  pergunta: string
 }

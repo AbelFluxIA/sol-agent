@@ -180,6 +180,11 @@ export async function createItinerary(phone: string, days: number, paymentId?: s
       days,
       paymentId,
       status: 'pending',
+      destination: conversation.destination,
+      arrivalDate: conversation.arrivalDate,
+      departureDate: conversation.departureDate,
+      groupType: conversation.groupType,
+      touristProfile: conversation.touristProfile,
     },
   })
 }
@@ -192,9 +197,23 @@ export async function updateItinerary(
     rawItinerary: string
     paymentId: string
     storyPhotoUrl: string
+    visitedNotes: string
   }>
 ) {
   return prisma.itinerary.update({ where: { id }, data })
+}
+
+// Retorna as últimas N viagens do cliente (mais recente primeiro) — histórico multi-viagem
+export async function getTripHistory(phone: string, limit = 5) {
+  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  if (!conversation) return []
+
+  return prisma.itinerary.findMany({
+    where: { conversationId: conversation.id },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+    select: { destination: true, arrivalDate: true, departureDate: true, status: true, createdAt: true },
+  })
 }
 
 // Reseta a conversa: apaga mensagens e volta para fase 1
@@ -211,7 +230,6 @@ export async function resetConversation(phone: string): Promise<void> {
     data: {
       phase: 1,
       onboardingStep: 0,
-      name: null,
       arrivalDate: null,
       departureDate: null,
       arrivalTime: null,

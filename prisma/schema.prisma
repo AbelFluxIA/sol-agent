@@ -76,7 +76,17 @@ model Itinerary {
   
   rawItinerary  String?   @db.Text  // texto gerado pelo agente
   storyPhotoUrl String?             // URL da foto enviada pelo cliente para o story
-  
+
+  // Snapshot da viagem no momento da criação (histórico multi-viagem do cliente)
+  destination    String?
+  arrivalDate    String?
+  departureDate  String?
+  groupType      String?
+  touristProfile String?
+
+  // Registro em texto livre de locais que o cliente mencionou já ter visitado (Sol Guia)
+  visitedNotes String? @db.Text
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

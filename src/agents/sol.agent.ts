@@ -6,7 +6,7 @@ import OpenAI from 'openai'
 import { config } from '../config'
 import { log } from '../logger'
 import { buildSolSystemPrompt } from '../prompts/sol.prompts'
-import { solTools, GerarRoteirArgs, RoteiroPersonalizadoArgs } from '../tools/sol.tools'
+import { solTools, GerarRoteirArgs, RoteiroPersonalizadoArgs, BuscarSugestaoArgs } from '../tools/sol.tools'
 
 const STATS_BASE_URL = 'https://iaturismo-two.vercel.app'
 import {
@@ -17,6 +17,7 @@ import {
   createItinerary,
   updateItinerary,
   getLatestItinerary,
+  getTripHistory,
   getReferrerPhone,
   addFreeCredit,
   getAccountStats,
@@ -24,7 +25,7 @@ import {
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons } from '../services/whatsapp.service'
 import { checkAndDeductCredit } from '../services/credits.service'
 import { getWeatherAndMarine } from '../services/weather.service'
-import { generateItineraryText, classifyDays } from './itinerary.agent'
+import { generateItineraryText, classifyDays, searchGroundedAnswer } from './itinerary.agent'
 import { generatePdf } from '../services/pdf.service'
 import { trackOperation } from '../shutdown'
 import { scheduleGuiaReminder } from '../services/guia-reminder.service'
@@ -72,15 +73,65 @@ function extractCurrentDaySection(rawItinerary: string, arrivalDate: string | nu
   return combined.substring(0, 2500) // ~600 tokens
 }
 
-// Verifica se o usuário tem viagem ativa ou futura
-function hasTripActive(departureDate: string | null): boolean {
+// Calcula o período atual do dia (fuso de João Pessoa) para o modo Guia não sugerir algo já passado
+function currentPeriodInfo(): { label: 'manhã' | 'tarde' | 'noite'; hour: number } {
+  const hour = parseInt(
+    new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo', hour: 'numeric', hour12: false })
+  )
+  if (hour < 12) return { label: 'manhã', hour }
+  if (hour < 18) return { label: 'tarde', hour }
+  return { label: 'noite', hour }
+}
+
+// Detecta, via LLM, se a mensagem do cliente indica que ele já visitou algo do roteiro
+// Roda em paralelo (fire-and-forget) — não bloqueia a resposta ao cliente
+async function trackVisitedPlaces(phone: string, userMessage: string): Promise<void> {
+  const itinerary = await getLatestItinerary(phone)
+  if (!itinerary?.rawItinerary) return
+
+  const detect = await openai.chat.completions.create({
+    model: config.openai.model,
+    messages: [
+      {
+        role: 'system',
+        content: `Você analisa uma mensagem de um turista e o roteiro dele. Se a mensagem indicar claramente que ele JÁ VISITOU/FEZ algo do roteiro (passado, não intenção futura), responda APENAS com o nome exato do local como está no roteiro. Se não houver menção clara, responda só "NADA".\n\nROTEIRO:\n${itinerary.rawItinerary.substring(0, 3000)}`,
+      },
+      { role: 'user', content: userMessage },
+    ],
+    max_tokens: 30,
+    temperature: 0,
+  })
+
+  const local = detect.choices[0]?.message?.content?.trim()
+  if (!local || local.toUpperCase() === 'NADA') return
+
+  const prevNotes = itinerary.visitedNotes ? itinerary.visitedNotes + '\n' : ''
+  await updateItinerary(itinerary.id, { visitedNotes: `${prevNotes}- ${local}` })
+  log.info('local marcado como visitado', { phone, data: { local } })
+}
+
+// Verifica se o usuário tem roteiro pago e viagem ativa ou futura
+function hasTripActive(departureDate: string | null, hasPaid: boolean): boolean {
+  if (!hasPaid) return false
   if (!departureDate) return false
   const dep = new Date(departureDate + 'T23:59:59')
-  const tomorrow = new Date()
-  tomorrow.setDate(tomorrow.getDate() + 1)
-  tomorrow.setHours(0, 0, 0, 0)
-  // Considera ativa até 1 dia depois da partida (deactivation buffer)
   return dep >= new Date()
+}
+
+// Monta bloco de perfil/histórico do cliente para injetar no prompt (cliente recorrente)
+async function buildProfileContext(phone: string, conversation: { name: string | null }): Promise<string> {
+  const parts: string[] = []
+  if (conversation.name) parts.push(`Nome do cliente: ${conversation.name}.`)
+
+  const history = (await getTripHistory(phone, 5))
+    .filter(h => h.destination)
+    .map(h => `- ${h.destination} (${h.arrivalDate ?? '?'} a ${h.departureDate ?? '?'}) [${h.status}]`)
+  if (history.length > 0) {
+    parts.push(`Histórico de viagens deste cliente (mais recente primeiro):\n${history.join('\n')}`)
+  }
+
+  if (parts.length === 0) return ''
+  return `\n\n[PERFIL DO CLIENTE — cliente recorrente. Use isso para não repetir perguntas já respondidas e cumprimentar de forma personalizada:\n${parts.join('\n')}]`
 }
 
 // Detecta tentativas de prompt injection / jailbreak antes de enviar ao modelo
@@ -123,6 +174,7 @@ export async function processMessage(
 
   // 1. Garante que a conversa existe no banco
   const conversation = await getOrCreateConversation(phone)
+  const profileContext = await buildProfileContext(phone, conversation)
 
   // Captura código de indicação se presente (ex: "Oi Sol! Vim pelo link de João (ref:ABC123)")
   const refMatch = userMessage.match(/\bref:([A-Z0-9]{6})\b/i)
@@ -145,7 +197,15 @@ export async function processMessage(
     const itinerarySection = itinerary?.rawItinerary
       ? `\n\n[ROTEIRO DO CLIENTE — DIA ATUAL:\n${extractCurrentDaySection(itinerary.rawItinerary, conversation.arrivalDate)}]`
       : ''
-    guiaContext = `\n\n[MODO GUIA ATIVO — hasCompanion: true. Oriente em tempo real com base no roteiro abaixo.]${itinerarySection}`
+    const visitedSection = itinerary?.visitedNotes
+      ? `\n\n[JÁ VISITADO/FEITO — não sugira de novo como próximo passo, a menos que o cliente peça para revisar:\n${itinerary.visitedNotes}]`
+      : ''
+    const { label: periodLabel, hour } = currentPeriodInfo()
+    guiaContext = `\n\n[MODO GUIA ATIVO — hasCompanion: true. Período atual do dia: ${periodLabel} (${hour}h). NUNCA sugira proativamente algo de um período que já passou hoje — só fale sobre isso se o cliente perguntar. Oriente em tempo real com base no roteiro abaixo.]${itinerarySection}${visitedSection}`
+
+    trackVisitedPlaces(phone, userMessage).catch(err =>
+      log.warn('falha ao rastrear local visitado', { phone, data: { error: (err as Error).message } })
+    )
   } else if (conversation.phase >= 5) {
     // Detecta pós-viagem: tem roteiro pago E já passou a data de partida
     const isPostTrip = conversation.departureDate
@@ -162,7 +222,7 @@ export async function processMessage(
   const response = await openai.chat.completions.create({
     model: config.openai.model,
     messages: [
-      { role: 'system', content: buildSolSystemPrompt() + guiaContext },
+      { role: 'system', content: buildSolSystemPrompt() + profileContext + guiaContext },
       ...history,
     ],
     tools: solTools,
@@ -192,6 +252,8 @@ export async function processMessage(
       toolReply = await handleAtivarGuia(phone, channel)
     } else if (toolName === 'pedir_foto_story') {
       toolReply = await handlePedirFotoStory(phone, channel)
+    } else if (toolName === 'buscar_sugestao_confiavel') {
+      toolReply = await handleBuscarSugestaoConfiavel(phone, toolArgs as BuscarSugestaoArgs, channel)
     }
     if (channel === 'app') return toolReply ?? 'Feito!'
     return
@@ -226,7 +288,7 @@ async function handleAtivarGuia(phone: string, channel: 'whatsapp' | 'app' = 'wh
     return msg
   }
 
-  if (!hasTripActive(conversation.departureDate)) {
+  if (!hasTripActive(conversation.departureDate, conversation.hasPaid)) {
     const msg = conversation.departureDate
       ? 'Essa viagem já encerrou. Quando você planejar a próxima, posso te acompanhar do primeiro ao último dia!'
       : 'Para ativar a Sol Guia você precisa ter um roteiro ativo. Vamos montar um primeiro?'
@@ -277,6 +339,19 @@ async function handlePedirFotoStory(phone: string, channel: 'whatsapp' | 'app' =
 }
 
 // ----------------------------------------------------------------
+// Handler: buscar_sugestao_confiavel (busca com grounding real para o modo Guia)
+// ----------------------------------------------------------------
+async function handleBuscarSugestaoConfiavel(phone: string, args: BuscarSugestaoArgs, channel: 'whatsapp' | 'app' = 'whatsapp'): Promise<string> {
+  const conversation = await getOrCreateConversation(phone)
+  const contextHint = conversation.destination ? `Cliente está em viagem em ${conversation.destination}.` : undefined
+  const result = await searchGroundedAnswer(args.pergunta, contextHint)
+  const reply = result || 'Não consegui confirmar isso agora com segurança — tenta perguntar de um jeito mais específico ou dá uma olhada direto no Google Maps por perto.'
+  await saveMessage(phone, 'assistant', reply)
+  if (channel === 'whatsapp') await sendWithTyping(phone, reply, 800)
+  return reply
+}
+
+// ----------------------------------------------------------------
 // Handler: gerar_roteiro_de_viagem
 // ----------------------------------------------------------------
 async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel: 'whatsapp' | 'app' = 'whatsapp'): Promise<string> {
@@ -320,6 +395,7 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   const hasFreeCredit = await checkAndDeductCredit(phone, resolvedName)
 
   if (hasFreeCredit) {
+    await createItinerary(phone, days)
     const freeMsg = buildFreeItineraryMessage(resolvedName)
     if (channel === 'whatsapp') await sendWithTyping(phone, freeMsg, 1000)
     await generateAndSendItinerary(phone, days)
@@ -529,7 +605,7 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
     await updateConversation(phone, { hasPaid: true, phase: 5 })
 
     // Oferta da Sol Guia com 2 botões — se viagem ativa (sempre, com ou sem link)
-    if (hasTripActive(departureDate)) {
+    if (hasTripActive(departureDate, true)) {
       await sleep(2000)
       const guiaMsg = buildGuiaOfferMessage(name)
       const buttonsText = buildGuiaButtonsText()
