@@ -82,6 +82,25 @@ export async function generateItineraryText(params: GenerateItineraryParams): Pr
   }
   const lastDayInstruction = buildLastDayInstruction()
 
+  // Se a chegada é HOJE e o roteiro só está sendo gerado agora (conversa longa, geração atrasada etc.),
+  // o horário de chegada informado no onboarding pode já ter passado — o DIA 1 não pode começar no passado.
+  function buildDay1StartInstruction(): string {
+    const now = new Date()
+    const todayStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }) // YYYY-MM-DD
+    if (arrivalDate !== todayStr) return ''
+
+    const nowTimeStr = now.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false })
+    const [nowH, nowM] = nowTimeStr.split(':').map(Number)
+    const [arrH, arrM] = (arrivalTime || '00:00').split(':').map(Number)
+    const nowMinutes = nowH * 60 + nowM
+    const arrMinutes = (arrH || 0) * 60 + (arrM || 0)
+
+    if (nowMinutes <= arrMinutes) return '' // ainda não passou do horário informado — nada a ajustar
+
+    return `⚠️ CHEGADA HOJE, ROTEIRO GERADO MAIS TARDE — agora são ${nowTimeStr} (horário local), e o horário de chegada informado (${arrivalTime}) já passou. O DIA 1 do roteiro DEVE começar a partir de agora (${nowTimeStr}) — NUNCA inclua atividade em horário anterior a esse. Pule o(s) período(s) do dia que já passaram (ex: se já é tarde, não inclua nada de manhã no Dia 1).`
+  }
+  const day1StartInstruction = buildDay1StartInstruction()
+
   const marineSection = marine
     ? `DADOS DO MAR POR DIA (ondas em metros):\n${JSON.stringify(marine.daily, null, 2)}`
     : 'Dados marinhos: não disponíveis para este destino (interior ou sem costa).'
@@ -108,6 +127,7 @@ ${transportMode ? `- Transporte de volta: ${transportMode === 'aviao' ? 'avião 
 ${forceDays ? `- Dias de roteiro: ${forceDays}` : ''}
 ${hasMonday ? '⚠️ SEGUNDA-FEIRA no roteiro — use apenas locais que abrem na segunda.' : ''}
 ${lastDayInstruction}
+${day1StartInstruction}
 
 ${marineSection}
 
