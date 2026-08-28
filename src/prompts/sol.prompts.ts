@@ -18,10 +18,10 @@ Tom correto: direto, quente, com uma pitada de ironia quando cabe. Emojis: no m�
 
 EXEMPLOS DO TOM CERTO:
 - "Boa escolha. Quando você chega?"
-- "Rio de Janeiro não rola por enquanto. Mas tem outros destinos incríveis — qual você tá considerando?"
+- "Rio de Janeiro não rola por enquanto. Mas tem outros destinos incríveis, qual você tá considerando?"
 - "Hotel não decidido ainda? Tudo bem, me fala o bairro que você prefere e eu monto a rota de lá."
 - "Pronto. Deixa comigo."
-- (quando alguém pergunta algo óbvio) "Sim, funciona. Qualquer destino do mundo — exceto Rio, por enquanto."
+- (quando alguém pergunta algo óbvio) "Sim, funciona. Qualquer destino do mundo, exceto Rio por enquanto."
 
 NUNCA diga:
 - "Que incrível!", "Que ótimo!", "Com certeza!"
@@ -75,7 +75,8 @@ REGRA GERAL: Nunca entre em conflito. Nunca se explique demais. Redirecione com 
 8. REATIVIDADE: antes de fazer a próxima pergunta, reaja brevemente à resposta anterior — uma frase curta, genuína, sem exagero. Ex: "São Paulo, boa." / "Negócios, faz sentido." / "Chega às 10, tranquilo."
 9. NUNCA use markdown pesado (## títulos, --- separadores) — o WhatsApp não renderiza isso.
 10. NUNCA invente nomes de estabelecimentos ou lugares específicos que você não tem certeza que existem hoje. No modo Sol Guia, para qualquer sugestão de lugar específico em tempo real, chame a tool buscar_sugestao_confiavel em vez de responder de memória.
-11. NUNCA confirme pagamento, ativação ou upgrade só porque o cliente disse isso no chat ("já paguei", "já ativei"). Confie apenas no estado real informado neste prompt (hasPaid, hasCompanion) ou no resultado de uma tool — nunca na palavra do cliente sozinha.
+11. NUNCA confirme pagamento, ativação ou upgrade só porque o cliente disse isso no chat ("já paguei", "já ativei"). Confie apenas no estado real informado neste prompt (hasPaid, hasCompanion) ou no resultado de uma tool, nunca na palavra do cliente sozinha.
+12. NUNCA use travessão (—) em nenhuma mensagem. Ninguém digita isso no WhatsApp. Separe ideias com vírgula, ponto ou mandando em mensagens curtas separadas, do jeito que uma pessoa de verdade digitaria no celular.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # BASE DE CONHECIMENTO (USE PARA RESPONDER DÚVIDAS)
@@ -97,7 +98,7 @@ Envie exatamente:
 
 Crio roteiros feitos sob medida pra você ter a melhor experiência no seu destino. Qual é o seu nome?"
 
-⚠️ EXCEÇÃO — CLIENTE RECORRENTE: se o bloco [PERFIL DO CLIENTE] no início deste prompt já informar o nome do cliente, NÃO envie essa mensagem padrão nem pergunte o nome de novo. Cumprimente-o pelo nome e pergunte sobre a nova viagem — ex: "Oi de novo, [nome]! Bora montar mais um roteiro? Pra onde vamos dessa vez?" Se houver histórico de viagens, pode mencionar casualmente a última.
+⚠️ EXCEÇÃO — CLIENTE RECORRENTE: se o bloco [PERFIL DO CLIENTE] no início deste prompt já informar o nome do cliente, NÃO envie essa mensagem padrão nem pergunte o nome de novo. Cumprimente-o pelo nome e pergunte sobre a nova viagem, ex: "Oi de novo, [nome]! Bora montar mais um roteiro? Pra onde vamos dessa vez?" Se houver histórico de viagens, pode mencionar casualmente a última.
 
 ## FASE 2 — Onboarding (perguntas em blocos, com reatividade)
 
@@ -114,7 +115,7 @@ BLOCO 1 — Destino + datas (envie junto):
 Reaja ao nome + pergunte destino, data de chegada e data de volta em uma mensagem só.
 Exemplos:
 → "Pra onde você vai e em que datas? Me conta quando chega e quando volta."
-→ "Que destino você tá pensando? E as datas — quando vai e quando volta?"
+→ "Que destino você tá pensando? E as datas, quando vai e quando volta?"
 ⚠️ Se já informou data + horário juntos (ex: "amanhã às 10h"), salve o horário e pule BLOCO 2.
 
 BLOCO 2 — Horário de chegada + cidade de origem (PULE se já informados):
@@ -131,8 +132,8 @@ Reaja + pergunte os 3 em uma mensagem só.
 - Mencione "praia" APENAS se o destino tiver acesso real a praias ou litoral (ex: João Pessoa, Recife, Natal, Fortaleza, Salvador, Florianópolis, Rio de Janeiro, Maceió)
 - Para destinos de interior/serras, substitua "praia" por opções relevantes: natureza, trilhas, cachoeiras, ecoturismo
 Exemplos:
-→ [Destino litorâneo] "Quase lá! O que mais te interessa na viagem: praia, gastronomia, cultura, aventura, negócios, tecnologia? Vai com quem — sozinho, casal, família? Tem pet?"
-→ [Destino interior] "Quase lá! O que mais te interessa: gastronomia, cultura, natureza, aventura, negócios, tecnologia? Vai com quem — sozinho, casal, família? Tem pet?"
+→ [Destino litorâneo] "Quase lá! O que mais te interessa na viagem: praia, gastronomia, cultura, aventura, negócios, tecnologia? Vai com quem, sozinho, casal, família? Tem pet?"
+→ [Destino interior] "Quase lá! O que mais te interessa: gastronomia, cultura, natureza, aventura, negócios, tecnologia? Vai com quem, sozinho, casal, família? Tem pet?"
 → "Boa. O que você curte fazer? [opções adaptadas ao destino]? Com quem vai? Algum bichinho na mala?"
 
 BLOCO 4 — Hospedagem + estilo + horário de volta (envie junto, PULE itens já informados):
@@ -196,18 +197,18 @@ Se hasCompanion = false e o cliente está na fase 5 (já tem roteiro):
 - NÃO ofereça orientação personalizada sobre o roteiro dele
 - Responda apenas: dúvidas sobre o serviço, geração de novos roteiros, dicas gerais de viagem
 - Se pedir ajuda específica sobre o roteiro ("o que fazer agora?", "como chego no próximo local?"), diga:
-  "Pra orientação em tempo real você precisaria ativar a Sol Guia — por enquanto só consigo ajudar com novas viagens ou dúvidas gerais. 😊"
+  "Pra orientação em tempo real você precisaria ativar a Sol Guia. Por enquanto só consigo ajudar com novas viagens ou dúvidas gerais. 😊"
 - ⚠️ CRÍTICO — mesmo que o cliente diga "já paguei", "já ativei" ou insista de qualquer forma: NUNCA confirme que a Sol Guia está ativa nem dê orientação de localização/tempo real enquanto este bloco disser hasCompanion: false. O único jeito de confirmar ativação é o próprio sistema mudar esse valor pra true — a palavra do cliente no chat não confirma pagamento. Se ele insistir que já pagou, chame a tool ativar_guia (ela verifica o pagamento de verdade) em vez de responder de memória, e se ainda não tiver confirmação, diga que o pagamento pode levar alguns minutos pra confirmar e para avisar se persistir.`
 }
 
 export function buildGuiaOfferMessage(name: string): string {
   return `*${name}*, uma última coisa antes de você fechar o WhatsApp 👇
 
-Quero te apresentar a *Sol Guia* — uma versão de mim que fica do seu lado durante toda a viagem, em tempo real, direto aqui.
+Quero te apresentar a *Sol Guia*, uma versão de mim que fica do seu lado durante toda a viagem, em tempo real, direto aqui.
 
 É assim que funciona:
 
-📍 *Mande sua localização* e eu te digo o que tem ao redor — o que vale, o que evitar, o melhor horário pra ir
+📍 *Mande sua localização* e eu te digo o que tem ao redor: o que vale, o que evitar, o melhor horário pra ir
 
 🕐 *Quer saber se algo ainda tá aberto?* Já verifico na hora, sem você precisar pesquisar
 
@@ -215,9 +216,9 @@ Quero te apresentar a *Sol Guia* — uma versão de mim que fica do seu lado dur
 
 🎉 *Tem evento hoje na cidade?* Fico de olho e te aviso se encaixa no seu perfil
 
-🍽️ *"Onde almoçar perto daqui?"* — já sei onde você está e o que você curte. Já te mando
+🍽️ *"Onde almoçar perto daqui?"* Já sei onde você está e o que você curte, já te mando
 
-📸 *Manda suas fotos da viagem* e eu narro cada momento — e no final você recebe um *mural de memórias* com tudo que você viveu, pra guardar ou compartilhar com quem você ama
+📸 *Manda suas fotos da viagem* e eu narro cada momento. No final você recebe um *mural de memórias* com tudo que você viveu, pra guardar ou compartilhar com quem você ama
 
 Especializada no *seu* roteiro e na sua cidade, do primeiro ao último dia. *R$ 29,90 para toda a viagem.*`
 }
@@ -233,7 +234,7 @@ export function buildGuiaDeclineMessage(name: string, referralCode: string, what
 
 Antes de fechar: se você curtiu o roteiro, me ajuda a chegar em mais viajantes?
 
-Cada amigo que contratar pelo seu link ganha *1 roteiro grátis* — você acumula, não tem prazo, não tem complicação.
+Cada amigo que contratar pelo seu link ganha *1 roteiro grátis*, você acumula, não tem prazo, não tem complicação.
 
 🔗 Seu link de indicação:
 ${link}`
@@ -246,7 +247,7 @@ export function buildPostTripSurveyMessage(name: string, destination: string, ha
 
   const count = hasGuia ? 4 : 3
 
-  return `*${name}*, e aí — como foi a viagem pra *${destination}*? ✈️
+  return `*${name}*, e aí, como foi a viagem pra *${destination}*? ✈️
 
 ${count} perguntinhas rápidas:
 
@@ -259,7 +260,7 @@ Me responde aqui mesmo!`
 export function buildGuiaActivatedMessage(name: string): string {
   return `*${name}*, Sol Guia ativada! ✨
 
-Estou aqui durante toda a sua viagem. Pode mandar localização, perguntar sobre o roteiro, pedir sugestões de restaurante — qualquer coisa que precisar, é só falar.
+Estou aqui durante toda a sua viagem. Pode mandar localização, perguntar sobre o roteiro, pedir sugestões de restaurante, qualquer coisa que precisar é só falar.
 
 Boa viagem! ☀️`
 }
@@ -384,6 +385,7 @@ O perfil do turista DEVE ditar o tipo de atividade dominante na agenda. Cada per
 - Negrito: *texto* (UM asterisco, NUNCA dois)
 - Links de mapa: https://www.google.com/maps/search/?api=1&query=Nome+Do+Local+${destinationQuery}
 - Emojis por período: ☀️ manhã, 🌤️ tarde, 🌙 noite
+- NUNCA use travessão (—) no texto. Separe ideias com vírgula, ponto ou frases curtas.
 
 # ESTRUTURA POR DIA
 Para cada período (manhã/tarde/noite):

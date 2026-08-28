@@ -10,6 +10,10 @@ function required(key: string): string {
 export const config = {
   port: Number(process.env.PORT) || 3000,
 
+  // TEMPORÁRIO — pra demonstração/teste sem cobrar. Libera roteiro e Sol Guia sem pagamento real.
+  // DESLIGAR (remover DEMO_FREE_MODE do .env ou setar =false) assim que a demo terminar.
+  demoFreeMode: process.env.DEMO_FREE_MODE === 'true',
+
   openai: {
     apiKey: required('OPENAI_API_KEY'),
     model: process.env.OPENAI_MODEL || 'gpt-5.4-mini',

@@ -53,6 +53,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+// Guarda contra glitch raro do modelo (mais provável em temperatura alta): repetir a mensagem
+// inteira duas vezes na mesma resposta, às vezes com só uma quebra de linha simples entre as
+// duas cópias (não dá pra confiar em separador fixo tipo "\n\n" — por isso corta por posição).
+function dedupeRepeatedMessage(text: string): string {
+  const trimmed = text.trim()
+  const len = trimmed.length
+  const mid = len / 2
+  for (let cut = Math.floor(mid) - 3; cut <= Math.ceil(mid) + 3; cut++) {
+    if (cut <= 0 || cut >= len) continue
+    const first = trimmed.slice(0, cut).trim()
+    const second = trimmed.slice(cut).trim()
+    if (first.length > 10 && first === second) return first
+  }
+  return text
+}
+
 // Extrai só o dia atual do roteiro (baseado na data de chegada vs hoje)
 // Reduz tokens de ~2000 para ~400 no contexto do guia
 function extractCurrentDaySection(rawItinerary: string, arrivalDate: string | null): string {
@@ -289,7 +305,7 @@ export async function processMessage(
   }
 
   // 6. Se é resposta de texto normal
-  const replyText = message?.content
+  const replyText = message?.content ? dedupeRepeatedMessage(message.content) : message?.content
   if (!replyText) {
     log.error('OpenAI retornou resposta vazia', new Error('empty response'), { phone })
     if (channel === 'app') return 'Tive um problema aqui. Tenta de novo?'
@@ -421,7 +437,8 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   const days = await classifyDays(data_chegada, data_saida, phone)
 
   // Verifica e desconta crédito grátis via Edge Function
-  const hasFreeCredit = await checkAndDeductCredit(phone, resolvedName)
+  // DEMO_FREE_MODE (temporário): trata como se tivesse crédito, sem descontar nada de verdade
+  const hasFreeCredit = config.demoFreeMode || await checkAndDeductCredit(phone, resolvedName)
 
   if (hasFreeCredit) {
     await createItinerary(phone, days)

@@ -359,7 +359,8 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
           await sendWithTyping(phone, 'A Sol Guia já está ativa para você! É só mandar sua localização ou perguntar qualquer coisa sobre o roteiro. ☀️', 600)
           return
         }
-        if (!config.companionPaymentLink) {
+        // DEMO_FREE_MODE (temporário): ativa direto, sem link de pagamento
+        if (config.demoFreeMode || !config.companionPaymentLink) {
           await updateConversation(phone, { hasCompanion: true })
           const activationMsg = buildGuiaActivatedMessage(conv.name || 'você')
           await sendHuman(phone, activationMsg)
