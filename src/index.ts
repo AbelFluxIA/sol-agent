@@ -15,9 +15,12 @@ const app = express()
 // CORS — permite o frontend PWA chamar o backend
 app.use(cors({
   origin: [
+    'https://iaturismo.vercel.app',
     'https://iaturismo-two.vercel.app',
     'http://localhost:8080',
     'http://localhost:5173',
+    // Outros endereços do app (ex.: domínio próprio), separados por vírgula
+    ...(process.env.APP_ORIGINS ?? '').split(',').map(s => s.trim()).filter(Boolean),
   ],
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
