@@ -2,10 +2,12 @@ import { getOrCreateConversation } from './database.service'
 import { sendWithTyping, sendInteractiveButtons } from './whatsapp.service'
 import { buildGuiaOfferMessage, buildGuiaButtonsText } from '../prompts/sol.prompts'
 import { saveMessage } from './database.service'
+import { canalAtual } from './canal.service'
 import { log } from '../logger'
 
 const guiaReminderTimers = new Map<string, NodeJS.Timeout>()
 
+// Lembrete só pelo WhatsApp: no app os botões Sim/Não continuam visíveis no chat.
 export function scheduleGuiaReminder(phone: string): void {
   const existing = guiaReminderTimers.get(phone)
   if (existing) clearTimeout(existing)
@@ -13,6 +15,7 @@ export function scheduleGuiaReminder(phone: string): void {
   const timer = setTimeout(async () => {
     guiaReminderTimers.delete(phone)
     try {
+      if (canalAtual(phone) !== 'whatsapp') return // a pessoa foi para o app
       const conv = await getOrCreateConversation(phone)
       if (conv.hasCompanion) return // já ativou
 

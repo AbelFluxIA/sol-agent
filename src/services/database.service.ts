@@ -216,6 +216,54 @@ export async function getTripHistory(phone: string, limit = 5) {
   })
 }
 
+// Viagens com roteiro já gerado, para a lista do app (mais recente primeiro)
+export async function listItineraries(phone: string, limit = 30) {
+  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  if (!conversation) return []
+
+  return prisma.itinerary.findMany({
+    where: { conversationId: conversation.id, rawItinerary: { not: null } },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+    select: {
+      id: true, days: true, status: true, pdfUrl: true,
+      destination: true, arrivalDate: true, departureDate: true, createdAt: true,
+    },
+  })
+}
+
+// Um roteiro específico, só se for desta pessoa
+export async function getItineraryForPhone(phone: string, id: string) {
+  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  if (!conversation) return null
+  return prisma.itinerary.findFirst({ where: { id, conversationId: conversation.id } })
+}
+
+// Celular brasileiro aparece com ou sem o 9 depois do DDD (o WhatsApp às vezes
+// manda o número antigo, sem o 9). Devolve as duas formas.
+export function phoneVariants(phone: string): string[] {
+  const d = phone.replace(/\D/g, '')
+  if (!d.startsWith('55')) return [d]
+  if (d.length === 13 && d[4] === '9') return [d, d.slice(0, 4) + d.slice(5)]
+  if (d.length === 12 && /[6-9]/.test(d[4])) return [d, d.slice(0, 4) + '9' + d.slice(4)]
+  return [d]
+}
+
+// Número que já tem conversa (com ou sem o 9). Assim o app entra na mesma
+// conversa do WhatsApp em vez de abrir outra vazia. Sem conversa: o próprio número.
+export async function resolvePhone(phone: string): Promise<string> {
+  const variants = phoneVariants(phone)
+  if (variants.length === 1) return variants[0]
+  // Se existirem as duas, fica a sem o 9: o app sempre grava com o 9, então a
+  // forma sem o 9 só pode ter vindo do próprio WhatsApp (é o número que ele usa).
+  const found = await prisma.conversation.findMany({
+    where: { phone: { in: variants } },
+    select: { phone: true },
+  })
+  found.sort((a, b) => a.phone.length - b.phone.length)
+  return found[0]?.phone ?? variants[0]
+}
+
 // Reseta a conversa: apaga mensagens e volta para fase 1
 export async function resetConversation(phone: string): Promise<void> {
   const conversation = await prisma.conversation.findUnique({ where: { phone } })

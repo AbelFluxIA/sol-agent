@@ -147,7 +147,7 @@ Escreva um comentário curto (2-3 linhas) sobre esta foto como se você fosse a 
       await supabasePatch('photo_murals', `id=eq.${muralId}`, { cover_photo_url: photoUrl })
     }
 
-    const muralUrl = `https://iaturismo-two.vercel.app/mural/${shareCode}`
+    const muralUrl = `${config.appPublicUrl}/mural/${shareCode}`
     log.info('foto adicionada ao mural', { phone, step: 'add-photo-mural', data: { orderIndex, muralUrl } })
 
     return `📸 *Mural atualizado!* Abre aqui:\n${muralUrl}`

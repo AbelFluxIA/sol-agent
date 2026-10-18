@@ -46,6 +46,9 @@ export const config = {
     webhookSecret: process.env.ABACATEPAY_WEBHOOK_SECRET || '',
   },
 
+  // Endereço público do app/painel (links de roteiro, mural e conta enviados ao cliente)
+  appPublicUrl: (process.env.APP_PUBLIC_URL || 'https://painel.tripsol.com.br').replace(/\/+$/, ''),
+
   // Número do WhatsApp da Sol (formato internacional sem +, ex: 5583999999999)
   whatsappNumber: process.env.WHATSAPP_NUMBER || '',
 

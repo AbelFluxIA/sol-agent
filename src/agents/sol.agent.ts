@@ -8,7 +8,6 @@ import { log } from '../logger'
 import { buildSolSystemPrompt } from '../prompts/sol.prompts'
 import { solTools, GerarRoteirArgs, RoteiroPersonalizadoArgs, BuscarSugestaoArgs } from '../tools/sol.tools'
 
-const STATS_BASE_URL = 'https://iaturismo-two.vercel.app'
 import {
   getOrCreateConversation,
   updateConversation,
@@ -29,7 +28,8 @@ import { getWeatherAndMarine } from '../services/weather.service'
 import { generateItineraryText, classifyDays, searchGroundedAnswer } from './itinerary.agent'
 import { generatePdf } from '../services/pdf.service'
 import { trackOperation } from '../shutdown'
-import { scheduleGuiaReminder } from '../services/guia-reminder.service'
+import { scheduleGuiaReminder, cancelGuiaReminder } from '../services/guia-reminder.service'
+import { Canal, marcarCanal, canalAtual } from '../services/canal.service'
 import {
   buildPaymentMessage,
   buildGeneratingMessage,
@@ -38,6 +38,8 @@ import {
   buildReferralMessage,
   buildGuiaOfferMessage,
   buildGuiaButtonsText,
+  buildGuiaActivatedMessage,
+  buildGuiaDeclineMessage,
 } from '../prompts/sol.prompts'
 import { PRICES, ValidDays } from '../types'
 
@@ -51,6 +53,87 @@ const reasoningEffortParam = config.openai.reasoningEffort
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+// Responde no canal em uso: salva no banco (a conversa aparece igual no app e no
+// WhatsApp) e só envia pelo WhatsApp quando a pessoa está lá.
+async function responder(phone: string, channel: Canal, texto: string, atraso = 800): Promise<string> {
+  await saveMessage(phone, 'assistant', texto)
+  if (channel === 'whatsapp') await sendWithTyping(phone, texto, atraso)
+  return texto
+}
+
+// Pergunta "Quer ativar a Sol Guia?" com Sim/Não. No WhatsApp vão botões de verdade;
+// no app o texto fica salvo e o chat mostra os mesmos dois botões.
+async function enviarPerguntaGuia(phone: string, channel: Canal): Promise<string> {
+  const buttonsText = buildGuiaButtonsText()
+  await saveMessage(phone, 'assistant', buttonsText)
+  if (channel === 'whatsapp') {
+    try {
+      await sendInteractiveButtons(phone, buttonsText, [
+        { id: 'guia_yes', title: 'Sim, quero! 🚀' },
+        { id: 'guia_no', title: 'Não, eu me viro' },
+      ])
+    } catch {
+      await sendWithTyping(phone, `${buttonsText}\n\nDigite *sim* para ativar.`, 300)
+    }
+    scheduleGuiaReminder(phone) // lembrete se não clicar em 10 min
+  }
+  return buttonsText
+}
+
+// Resposta ao "Quer ativar a Sol Guia?" — o mesmo efeito tocando no botão do WhatsApp
+// ou do app. Retorna o que aconteceu para quem chamou decidir os próximos passos.
+// textoDoBotao: o que a pessoa tocou (fica salvo no histórico); null quando a
+// mensagem dela já foi salva antes (resposta digitada no chat).
+export async function responderOfertaGuia(
+  phone: string,
+  aceitou: boolean,
+  channel: Canal,
+  textoDoBotao: string | null,
+): Promise<{ resultado: 'ja_ativa' | 'ativada' | 'pagamento' | 'recusou'; textos: string[] }> {
+  marcarCanal(phone, channel)
+  cancelGuiaReminder(phone)
+  const conv = await getOrCreateConversation(phone)
+  const name = conv.name || 'você'
+  if (textoDoBotao !== null) await saveMessage(phone, 'user', textoDoBotao)
+
+  if (!aceitou) {
+    const referralCode = conv.referralCode || ''
+    if (referralCode && config.whatsappNumber) {
+      const declineMsg = buildGuiaDeclineMessage(name, referralCode, config.whatsappNumber)
+      await saveMessage(phone, 'assistant', declineMsg)
+      if (channel === 'whatsapp') await sendHuman(phone, declineMsg)
+      return { resultado: 'recusou', textos: [declineMsg] }
+    }
+    const msg = `Tudo bem, *${name}*! Se mudar de ideia durante a viagem é só me chamar aqui. Boa viagem ☀️`
+    return { resultado: 'recusou', textos: [await responder(phone, channel, msg)] }
+  }
+
+  if (conv.hasCompanion) {
+    const msg = 'A Sol Guia já está ativa para você! É só mandar sua localização ou perguntar qualquer coisa sobre o roteiro. ☀️'
+    return { resultado: 'ja_ativa', textos: [await responder(phone, channel, msg, 600)] }
+  }
+
+  // DEMO_FREE_MODE (temporário): ativa direto, sem link de pagamento
+  if (config.demoFreeMode || !config.companionPaymentLink) {
+    await updateConversation(phone, { hasCompanion: true })
+    const activationMsg = buildGuiaActivatedMessage(name)
+    await saveMessage(phone, 'assistant', activationMsg)
+    if (channel === 'whatsapp') await sendHuman(phone, activationMsg)
+    return { resultado: 'ativada', textos: [activationMsg] }
+  }
+
+  const payText = 'Perfeito! Toque no botão abaixo para ativar:'
+  await saveMessage(phone, 'assistant', `${payText}\n${config.companionPaymentLink}`)
+  if (channel === 'whatsapp') {
+    try {
+      await sendCtaButton(phone, payText, 'Ativar agora', config.companionPaymentLink)
+    } catch {
+      await sendWithTyping(phone, `${payText}\n\n${config.companionPaymentLink}`, 400)
+    }
+  }
+  return { resultado: 'pagamento', textos: [`${payText}\n${config.companionPaymentLink}`] }
 }
 
 // Guarda contra glitch raro do modelo (mais provável em temperatura alta): repetir a mensagem
@@ -192,17 +275,18 @@ function isInjectionAttempt(msg: string): boolean {
 export async function processMessage(
   phone: string,
   userMessage: string,
-  channel: 'whatsapp' | 'app' = 'whatsapp'
+  channel: Canal = 'whatsapp'
 ): Promise<string | void> {
   log.info('mensagem recebida', { phone, data: { preview: userMessage.substring(0, 80), channel } })
+  marcarCanal(phone, channel)
 
   // Guardrail de primeiro nível: detecta injeção antes de qualquer processamento
   if (isInjectionAttempt(userMessage)) {
     log.warn('tentativa de injeção detectada', { phone, data: { preview: userMessage.substring(0, 80) } })
     await saveMessage(phone, 'user', userMessage)
     const guardReply = 'Não funciona assim comigo. O que você precisava sobre a viagem?'
+    await responder(phone, channel, guardReply)
     if (channel === 'app') return guardReply
-    await sendWithTyping(phone, guardReply, 800)
     return
   }
 
@@ -314,92 +398,78 @@ export async function processMessage(
 
   // 7. Salva resposta e envia humanizado (quebrado em partes naturais)
   await saveMessage(phone, 'assistant', replyText)
-  if (channel === 'app') return replyText
-  await sendHuman(phone, replyText)
+  if (channel === 'whatsapp') await sendHuman(phone, replyText)
 
   // 8. Atualiza fase se necessário
   await updatePhaseFromResponse(phone, replyText, conversation.phase)
+  if (channel === 'app') return replyText
 }
 
 // ----------------------------------------------------------------
 // Handler: ativar_guia
 // ----------------------------------------------------------------
-async function handleAtivarGuia(phone: string, channel: 'whatsapp' | 'app' = 'whatsapp'): Promise<string> {
+async function handleAtivarGuia(phone: string, channel: Canal = 'whatsapp'): Promise<string> {
   const conversation = await getOrCreateConversation(phone)
 
   if (conversation.hasCompanion) {
-    const msg = 'A Sol Guia já está ativa para você! É só mandar sua localização ou me perguntar qualquer coisa sobre o roteiro. ☀️'
-    if (channel === 'whatsapp') await sendWithTyping(phone, msg, 600)
-    return msg
+    return responder(phone, channel, 'A Sol Guia já está ativa para você! É só mandar sua localização ou me perguntar qualquer coisa sobre o roteiro. ☀️', 600)
   }
 
   if (!hasTripActive(conversation.departureDate, conversation.hasPaid)) {
     const msg = conversation.departureDate
       ? 'Essa viagem já encerrou. Quando você planejar a próxima, posso te acompanhar do primeiro ao último dia!'
       : 'Para ativar a Sol Guia você precisa ter um roteiro ativo. Vamos montar um primeiro?'
-    if (channel === 'whatsapp') await sendWithTyping(phone, msg, 600)
-    return msg
+    return responder(phone, channel, msg, 600)
   }
 
-  if (!config.companionPaymentLink) {
-    const msg = 'A ativação estará disponível em breve! Me avise e eu te mando o link assim que estiver pronto.'
-    if (channel === 'whatsapp') await sendWithTyping(phone, msg, 600)
-    return msg
+  // A pessoa está respondendo "sim" à pergunta "Quer ativar a Sol Guia?": ativa
+  // (ou manda o pagamento) em vez de repetir a oferta.
+  const ultimas = await getRecentMessages(phone, 3)
+  const ultimaDaSol = [...ultimas].reverse().find(m => m.role === 'assistant')
+  if (ultimaDaSol?.content.trim() === buildGuiaButtonsText()) {
+    // A mensagem do cliente já foi salva por processMessage; não salva de novo.
+    const { textos } = await responderOfertaGuia(phone, true, channel, null)
+    return textos.join('\n\n')
   }
 
   const name = conversation.name || 'você'
-  const offerMsg = buildGuiaOfferMessage(name)
-  const buttonsText = buildGuiaButtonsText()
-
+  const offerMsg = buildGuiaOfferMessage(name, channel)
   await saveMessage(phone, 'assistant', offerMsg)
-  await saveMessage(phone, 'assistant', buttonsText)
   if (channel === 'whatsapp') {
     await sendWithTyping(phone, offerMsg, 1200)
     await sleep(800)
-    try {
-      await sendInteractiveButtons(phone, buttonsText, [
-        { id: 'guia_yes', title: 'Sim, quero! 🚀' },
-        { id: 'guia_no', title: 'Não, eu me viro' },
-      ])
-    } catch {
-      await sendWithTyping(phone, `${buttonsText}\n\nDigite *sim* para ativar.`, 300)
-    }
-    scheduleGuiaReminder(phone) // lembrete se não clicar em 10 min
   }
+  const buttonsText = await enviarPerguntaGuia(phone, channel)
   return `${offerMsg}\n\n${buttonsText}`
 }
 
 // ----------------------------------------------------------------
 // Handler: pedir_foto_story (regeneração sob demanda)
 // ----------------------------------------------------------------
-async function handlePedirFotoStory(phone: string, channel: 'whatsapp' | 'app' = 'whatsapp'): Promise<string> {
+async function handlePedirFotoStory(phone: string, channel: Canal = 'whatsapp'): Promise<string> {
   const latestIt = await getLatestItinerary(phone)
   if (latestIt?.storyPhotoUrl) {
     await updateItinerary(latestIt.id, { storyPhotoUrl: null as any })
   }
   const msg = `📸 Me manda uma foto sua pelo WhatsApp e eu crio uma imagem personalizada da viagem pra você compartilhar nos stories!`
-  await saveMessage(phone, 'assistant', msg)
-  if (channel === 'whatsapp') await sendWithTyping(phone, msg, 800)
-  return msg
+  return responder(phone, channel, msg)
 }
 
 // ----------------------------------------------------------------
 // Handler: buscar_sugestao_confiavel (busca com grounding real para o modo Guia)
 // ----------------------------------------------------------------
-async function handleBuscarSugestaoConfiavel(phone: string, args: BuscarSugestaoArgs, channel: 'whatsapp' | 'app' = 'whatsapp'): Promise<string> {
+async function handleBuscarSugestaoConfiavel(phone: string, args: BuscarSugestaoArgs, channel: Canal = 'whatsapp'): Promise<string> {
   const conversation = await getOrCreateConversation(phone)
   const contextHint = conversation.destination ? `Cliente está em viagem em ${conversation.destination}.` : undefined
   const result = await searchGroundedAnswer(args.pergunta, contextHint, phone)
   const reply = result || 'Não consegui confirmar isso agora com segurança — tenta perguntar de um jeito mais específico ou dá uma olhada direto no Google Maps por perto.'
-  await saveMessage(phone, 'assistant', reply)
-  if (channel === 'whatsapp') await sendWithTyping(phone, reply, 800)
-  return reply
+  return responder(phone, channel, reply)
 }
 
 // ----------------------------------------------------------------
 // Handler: gerar_roteiro_de_viagem
 // ----------------------------------------------------------------
-async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel: 'whatsapp' | 'app' = 'whatsapp'): Promise<string> {
+async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel: Canal = 'whatsapp'): Promise<string> {
   const {
     destino,
     data_chegada,
@@ -442,12 +512,17 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
 
   if (hasFreeCredit) {
     await createItinerary(phone, days)
-    const freeMsg = buildFreeItineraryMessage(resolvedName)
-    if (channel === 'whatsapp') await sendWithTyping(phone, freeMsg, 1000)
-    await generateAndSendItinerary(phone, days)
-    return channel === 'app'
-      ? `${freeMsg}\n\nSeu roteiro está sendo gerado agora! Em instantes você poderá ver na aba Roteiro.`
-      : undefined as any
+    const freeMsg = await responder(phone, channel, buildFreeItineraryMessage(resolvedName), 1000)
+    if (channel === 'app') {
+      // No app a geração roda em segundo plano (leva mais de um minuto);
+      // as mensagens aparecem no chat do app conforme ficam prontas.
+      trackOperation('generate-itinerary', () => generateAndSendItinerary(phone, days, 'app')).catch(err =>
+        log.error('erro ao gerar roteiro pelo app', err, { phone })
+      )
+      return freeMsg
+    }
+    await generateAndSendItinerary(phone, days, 'whatsapp')
+    return undefined as any
   }
 
   // Sem créditos — cobra
@@ -456,24 +531,26 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
 
   if (!paymentLink) {
     log.error('link de pagamento não configurado', new Error(`missing payment link for ${days} days`), { phone, data: { days } })
-    const errMsg = 'Ops, tive um probleminha aqui. Já resolvo. 😅'
-    if (channel === 'whatsapp') await sendWithTyping(phone, errMsg, 1000)
-    return errMsg
+    return responder(phone, channel, 'Ops, tive um probleminha aqui. Já resolvo. 😅', 1000)
   }
 
   await createItinerary(phone, days)
   await updateConversation(phone, { phase: 4 })
 
   const { bodyText } = buildPaymentMessage(resolvedName, days, prices.original, prices.discounted)
+  return enviarPagamento(phone, channel, bodyText, paymentLink)
+}
 
-  await saveMessage(phone, 'assistant', bodyText)
+// Mensagem de pagamento: no WhatsApp vai com botão; no app o link fica no texto
+// (o chat do app mostra como botão). O histórico guarda o link nos dois casos.
+async function enviarPagamento(phone: string, channel: Canal, bodyText: string, paymentLink: string): Promise<string> {
+  const comLink = `${bodyText}\n\n${paymentLink}`
+  await saveMessage(phone, 'assistant', comLink)
   if (channel === 'whatsapp') {
     await sleep(2000)
     await sendCtaButton(phone, bodyText, 'Liberar meu roteiro', paymentLink)
   }
-  return channel === 'app'
-    ? `${bodyText}\n\n🔗 Link de pagamento enviado também no seu WhatsApp!`
-    : undefined as any
+  return comLink
 }
 
 // ----------------------------------------------------------------
@@ -482,7 +559,7 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
 async function handleRoteiroPersonalizado(
   phone: string,
   args: RoteiroPersonalizadoArgs,
-  channel: 'whatsapp' | 'app' = 'whatsapp'
+  channel: Canal = 'whatsapp'
 ): Promise<string> {
   const { dias_roteiro } = args
   const days = dias_roteiro as ValidDays
@@ -491,9 +568,7 @@ async function handleRoteiroPersonalizado(
   const paymentLink = config.paymentLinks[days]
 
   if (!paymentLink) {
-    const errMsg = 'Ops, tive um probleminha aqui! Já resolvo. 😅'
-    if (channel === 'whatsapp') await sendWithTyping(phone, errMsg, 1000)
-    return errMsg
+    return responder(phone, channel, 'Ops, tive um probleminha aqui! Já resolvo. 😅', 1000)
   }
 
   await createItinerary(phone, days)
@@ -502,31 +577,21 @@ async function handleRoteiroPersonalizado(
   const name = conversation.name || 'você'
 
   const { bodyText } = buildPaymentMessage(name, days, prices.original, prices.discounted)
-
-  await saveMessage(phone, 'assistant', bodyText)
-  if (channel === 'whatsapp') {
-    await sleep(2000)
-    await sendCtaButton(phone, bodyText, 'Liberar meu roteiro', paymentLink)
-  }
-  return channel === 'app'
-    ? `${bodyText}\n\n🔗 Link de pagamento enviado também no seu WhatsApp!`
-    : undefined as any
+  return enviarPagamento(phone, channel, bodyText, paymentLink)
 }
 
 // ----------------------------------------------------------------
 // Handler: consultar_meus_creditos
 // ----------------------------------------------------------------
-async function handleConsultarCreditos(phone: string, channel: 'whatsapp' | 'app' = 'whatsapp'): Promise<string> {
+async function handleConsultarCreditos(phone: string, channel: Canal = 'whatsapp'): Promise<string> {
   const stats = await getAccountStats(phone)
 
   if (!stats) {
-    const errMsg = 'Não encontrei seus dados aqui. Tenta de novo?'
-    if (channel === 'whatsapp') await sendWithTyping(phone, errMsg, 500)
-    return errMsg
+    return responder(phone, channel, 'Não encontrei seus dados aqui. Tenta de novo?', 500)
   }
 
   const { name, freeCredits, referralCode, totalReferrals, convertedReferrals } = stats
-  const statsUrl = `${STATS_BASE_URL}/stats/${referralCode}`
+  const statsUrl = `${config.appPublicUrl}/stats/${referralCode}`
 
   const msg = `*${name || 'Você'}*, aqui estão seus dados:
 
@@ -543,9 +608,9 @@ Veja o histórico completo: ${statsUrl}`
 
 // ----------------------------------------------------------------
 // Gera e envia o roteiro após pagamento confirmado
-// Chamado pelo webhook do Abacate Pay
+// Chamado pelo webhook do Abacate Pay (no canal em que a pessoa estava por último)
 // ----------------------------------------------------------------
-export async function generateAndSendItinerary(phone: string, forceDays?: number): Promise<void> {
+export async function generateAndSendItinerary(phone: string, forceDays?: number, channel: Canal = canalAtual(phone)): Promise<void> {
   const conversation = await getOrCreateConversation(phone)
 
   const {
@@ -568,16 +633,19 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
 
   if (!destination) {
     log.error('destino ausente ao gerar roteiro', new Error('destination is null'), { phone })
-    await sendWithTyping(phone, 'Ops, tive um probleminha com o seu destino. Me manda pra qual cidade vai viajar? 😅', 800)
+    await responder(phone, channel, 'Ops, tive um probleminha com o seu destino. Me manda pra qual cidade vai viajar? 😅')
     return
   }
   const dest = destination
 
-  log.info('iniciando geração de roteiro', { phone, data: { dest, arrivalDate, departureDate, name } })
+  log.info('iniciando geração de roteiro', { phone, data: { dest, arrivalDate, departureDate, name, channel } })
 
   try {
+    // Busca o Itinerary já criado (para linkar o custo da geração a ele)
+    const latestIt = await getLatestItinerary(phone)
+
     // Avisa que está gerando
-    await sendWithTyping(phone, buildGeneratingMessage(name), 500)
+    await responder(phone, channel, buildGeneratingMessage(name, latestIt?.status === 'paid'), 500)
 
     // Busca clima e maré com base no destino
     const { weather, marine } = await log.timed(phone, 'weather/marine', () =>
@@ -588,9 +656,6 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
     const days = forceDays || (await log.timed(phone, 'classify-days', () =>
       classifyDays(arrivalDate, departureDate, phone)
     ))
-
-    // Busca o Itinerary já criado (para linkar o custo da geração a ele)
-    const latestIt = await getLatestItinerary(phone)
 
     // Gera o texto do roteiro
     const itineraryText = await log.timed(phone, 'gemini-itinerary', () =>
@@ -627,28 +692,36 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
       })
     )
 
-    // Envia link interativo (roteiro web com checkboxes)
+    if (latestIt && pdfUrl) {
+      await updateItinerary(latestIt.id, { pdfUrl })
+    }
+
+    // Link do roteiro interativo (abre dentro do app quando a pessoa já entrou nele)
     // Usa try/catch próprio — falha aqui não pode matar o envio do PDF
     if (shareCode) {
-      const interactiveUrl = `https://iaturismo-two.vercel.app/r/${shareCode}`
+      const interactiveUrl = `${config.appPublicUrl}/r/${shareCode}`
       const interactiveMsg = `Aqui está o seu roteiro interativo — marque cada atividade conforme for fazendo! ✅`
       await saveMessage(phone, 'assistant', `${interactiveMsg}\n${interactiveUrl}`)
-      try {
-        await sendCtaButton(phone, interactiveMsg, 'Abrir roteiro', interactiveUrl)
-      } catch {
-        // CTA falhou (domínio não registrado no Meta) — envia como texto simples
-        await sendWithTyping(phone, `${interactiveMsg}\n\n${interactiveUrl}`, 500)
+      if (channel === 'whatsapp') {
+        try {
+          await sendCtaButton(phone, interactiveMsg, 'Abrir roteiro', interactiveUrl)
+        } catch {
+          // CTA falhou (domínio não registrado no Meta) — envia como texto simples
+          await sendWithTyping(phone, `${interactiveMsg}\n\n${interactiveUrl}`, 500)
+        }
+        await sleep(1500)
       }
-      await sleep(1500)
     }
 
     // Envia o PDF como botão CTA
     const pdfMessage = buildItinerarySentMessage()
     await saveMessage(phone, 'assistant', `${pdfMessage}\n${pdfUrl}`)
-    try {
-      await sendCtaButton(phone, pdfMessage, 'Baixar PDF', pdfUrl)
-    } catch {
-      await sendWithTyping(phone, `${pdfMessage}\n\n${pdfUrl}`, 500)
+    if (channel === 'whatsapp') {
+      try {
+        await sendCtaButton(phone, pdfMessage, 'Baixar PDF', pdfUrl)
+      } catch {
+        await sendWithTyping(phone, `${pdfMessage}\n\n${pdfUrl}`, 500)
+      }
     }
 
     // Marca como pago e roteiro enviado
@@ -656,32 +729,20 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
 
     // Oferta da Sol Guia com 2 botões — se viagem ativa (sempre, com ou sem link)
     if (hasTripActive(departureDate, true)) {
-      await sleep(2000)
-      const guiaMsg = buildGuiaOfferMessage(name)
-      const buttonsText = buildGuiaButtonsText()
+      if (channel === 'whatsapp') await sleep(2000)
+      const guiaMsg = buildGuiaOfferMessage(name, channel)
       await saveMessage(phone, 'assistant', guiaMsg)
-      await sendWithTyping(phone, guiaMsg, 1200)
-      await sleep(800)
-      await saveMessage(phone, 'assistant', buttonsText)
-      try {
-        await sendInteractiveButtons(phone, buttonsText, [
-          { id: 'guia_yes', title: 'Sim, quero! 🚀' },
-          { id: 'guia_no', title: 'Não, eu me viro' },
-        ])
-      } catch {
-        await sendWithTyping(phone, `${buttonsText}\n\nDigite *sim* para ativar.`, 300)
+      if (channel === 'whatsapp') {
+        await sendWithTyping(phone, guiaMsg, 1200)
+        await sleep(800)
       }
-      scheduleGuiaReminder(phone) // lembrete se não clicar em 10 min
+      await enviarPerguntaGuia(phone, channel)
     }
 
-    log.info('roteiro enviado com sucesso', { phone })
+    log.info('roteiro enviado com sucesso', { phone, data: { channel } })
   } catch (error) {
     log.error('erro ao gerar roteiro', error, { phone })
-    await sendWithTyping(
-      phone,
-      'Ops, tive um problema técnico aqui 😅 Mas já já resolvo e te mando tudo certinho!',
-      1000
-    )
+    await responder(phone, channel, 'Ops, tive um problema técnico aqui 😅 Mas já já resolvo e te mando tudo certinho!', 1000)
   }
 }
 

@@ -1,17 +1,17 @@
 import { Router, Request, Response } from 'express'
 import OpenAI from 'openai'
 import { toFile } from 'openai'
-import { processMessage } from '../agents/sol.agent'
-import { generateAndSendItinerary } from '../agents/sol.agent'
+import { processMessage, generateAndSendItinerary, responderOfertaGuia } from '../agents/sol.agent'
+import { canalAtual } from '../services/canal.service'
 import { trackOperation } from '../shutdown'
 import fs from 'fs'
 import path from 'path'
-import { getOrCreateConversation, updateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit } from '../services/database.service'
+import { getOrCreateConversation, updateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit, saveMessage } from '../services/database.service'
 import { markAsRead, downloadMedia, sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { watermarkImage, watermarkVideo } from '../services/watermark.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
 import { generateStoryImage, uploadStoryImage } from '../services/story.service'
-import { buildGuiaActivatedMessage, buildGuiaDeclineMessage, buildGuiaOfferMessage, buildGuiaButtonsText, buildReferralMessage } from '../prompts/sol.prompts'
+import { buildGuiaActivatedMessage, buildReferralMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
 import { config } from '../config'
 
@@ -57,6 +57,7 @@ async function runAutoStory(phone: string): Promise<void> {
 
 async function sendPhotoRequest(phone: string): Promise<void> {
   const msg = `📸 Uma última coisa: me manda uma foto sua e eu crio uma imagem personalizada da sua viagem pra você compartilhar nos stories!`
+  await saveMessage(phone, 'assistant', msg)
   await sendWithTyping(phone, msg, 2000)
 
   // Após 10 min sem foto, gera com destino apenas
@@ -181,6 +182,7 @@ async function saveCustomerPhoto(phone: string, mediaId: string, hasCompanion: b
   if (hasCompanion) {
     const narration = await addPhotoToMuralWithNarration(phone, photoUrl, buffer, mimeType)
     if (narration) {
+      await saveMessage(phone, 'assistant', narration)
       await sendWithTyping(phone, narration, 1200)
     }
   }
@@ -352,40 +354,11 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
       const { id: buttonId } = buttonReply
       log.info('botão clicado', { phone, data: { buttonId } })
 
-      if (buttonId === 'guia_yes') {
-        cancelGuiaReminder(phone) // clicou — cancela o lembrete
-        const conv = await getOrCreateConversation(phone)
-        if (conv.hasCompanion) {
-          await sendWithTyping(phone, 'A Sol Guia já está ativa para você! É só mandar sua localização ou perguntar qualquer coisa sobre o roteiro. ☀️', 600)
-          return
-        }
-        // DEMO_FREE_MODE (temporário): ativa direto, sem link de pagamento
-        if (config.demoFreeMode || !config.companionPaymentLink) {
-          await updateConversation(phone, { hasCompanion: true })
-          const activationMsg = buildGuiaActivatedMessage(conv.name || 'você')
-          await sendHuman(phone, activationMsg)
-          await sendPhotoRequest(phone)
-          return
-        }
-        const payText = 'Perfeito! Clica no botão abaixo para ativar:'
-        try {
-          await sendCtaButton(phone, payText, 'Ativar agora', config.companionPaymentLink)
-        } catch {
-          await sendWithTyping(phone, `${payText}\n\n${config.companionPaymentLink}`, 400)
-        }
-        await sendPhotoRequest(phone)
-      } else if (buttonId === 'guia_no') {
-        cancelGuiaReminder(phone) // clicou — cancela o lembrete
-        const conv = await getOrCreateConversation(phone)
-        const name = conv.name || 'você'
-        const referralCode = conv.referralCode || ''
-        if (referralCode && config.whatsappNumber) {
-          const declineMsg = buildGuiaDeclineMessage(name, referralCode, config.whatsappNumber)
-          await sendHuman(phone, declineMsg)
-        } else {
-          await sendWithTyping(phone, `Tudo bem, *${name}*! Se mudar de ideia durante a viagem é só me chamar aqui. Boa viagem ☀️`, 800)
-        }
-        await sendPhotoRequest(phone)
+      if (buttonId === 'guia_yes' || buttonId === 'guia_no') {
+        const aceitou = buttonId === 'guia_yes'
+        const titulo = buttonReply.title || (aceitou ? 'Sim, quero! 🚀' : 'Não, eu me viro')
+        const { resultado } = await responderOfertaGuia(phone, aceitou, 'whatsapp', titulo)
+        if (resultado !== 'ja_ativa') await sendPhotoRequest(phone)
       }
       return
     } else {
@@ -471,7 +444,7 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
       }
     }
 
-    trackOperation('generate-itinerary', () => generateAndSendItinerary(phone)).catch(err => {
+    trackOperation('generate-itinerary', () => generateAndSendItinerary(phone, undefined, canalAtual(phone))).catch(err => {
       log.error('erro ao gerar roteiro pós-pagamento', err, { phone })
     })
   } catch (error) {
@@ -512,7 +485,8 @@ router.post('/webhook/payment-guia', async (req: Request, res: Response) => {
     const conv = await getOrCreateConversation(phone)
     const name = conv.name || 'você'
     const msg = buildGuiaActivatedMessage(name)
-    await sendHuman(phone, msg)
+    await saveMessage(phone, 'assistant', msg)
+    if (canalAtual(phone) === 'whatsapp') await sendHuman(phone, msg)
 
   } catch (error) {
     log.error('erro no webhook guia', error, {})

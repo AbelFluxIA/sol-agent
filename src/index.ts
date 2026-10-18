@@ -15,6 +15,7 @@ const app = express()
 // CORS — permite o frontend PWA chamar o backend
 app.use(cors({
   origin: [
+    'https://painel.tripsol.com.br',
     'https://iaturismo.vercel.app',
     'https://iaturismo-two.vercel.app',
     'http://localhost:8080',
