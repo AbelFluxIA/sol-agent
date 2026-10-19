@@ -21,7 +21,10 @@ import {
   addFreeCredit,
   getAccountStats,
 } from '../services/database.service'
-import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons } from '../services/whatsapp.service'
+import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
+import { saveCustomerPhotoBuffer } from '../services/media.service'
+import { addPhotoToMuralWithNarration } from '../services/mural.service'
+import { generateStoryImage, uploadStoryImage } from '../services/story.service'
 import { checkAndDeductCredit } from '../services/credits.service'
 import { logApiUsage } from '../services/usage.service'
 import { getWeatherAndMarine } from '../services/weather.service'
@@ -403,6 +406,73 @@ export async function processMessage(
   // 8. Atualiza fase se necessário
   await updatePhaseFromResponse(phone, replyText, conversation.phase)
   if (channel === 'app') return replyText
+}
+
+// ----------------------------------------------------------------
+// Foto do cliente (WhatsApp ou app) — mesmo efeito nos dois canais:
+// - fica salva (com marca d'água) e aparece na conversa;
+// - primeira foto depois do roteiro: vira a imagem personalizada para os stories;
+// - com a Sol Guia ativa: entra no mural de memórias com a narração da Sol;
+// - sem a Sol Guia e com roteiro: a Sol oferece a Sol Guia.
+// ----------------------------------------------------------------
+export async function receberFoto(
+  phone: string,
+  rawBuffer: Buffer,
+  mimeType: string,
+  channel: Canal,
+  opts: { mediaId?: string; aoComecarStory?: () => void; aoSalvar?: (photoUrl: string) => void } = {},
+): Promise<void> {
+  marcarCanal(phone, channel)
+  const conv = await getOrCreateConversation(phone)
+  const { photoUrl, buffer, mimeType: tipo } = await saveCustomerPhotoBuffer(phone, rawBuffer, mimeType, opts.mediaId)
+  await saveMessage(phone, 'user', `📷 Foto\n${photoUrl}`)
+  opts.aoSalvar?.(photoUrl)
+
+  const name = conv.name || 'Viajante'
+  const destination = conv.destination || ''
+  const latest = (conv.hasPaid || conv.hasCompanion) ? await getLatestItinerary(phone) : null
+  const fazStory = !!latest && !latest.storyPhotoUrl
+
+  if (fazStory && latest) {
+    await responder(phone, channel, 'Recebida! Montando sua foto personalizada... ✨', 600)
+    opts.aoComecarStory?.()
+    try {
+      const storyBuffer = await generateStoryImage(name, destination, rawBuffer)
+      const storyUrl = storyBuffer ? await uploadStoryImage(phone, storyBuffer) : null
+      if (!storyUrl) throw new Error('story não gerado')
+      await updateItinerary(latest.id, { storyPhotoUrl: storyUrl })
+      const legenda = `Roteiro para ${destination} — ${name} ✈️`
+      await saveMessage(phone, 'assistant', `${legenda}\n${storyUrl}`)
+      if (channel === 'whatsapp') await sendImage(phone, storyUrl, legenda)
+      const referralCode = conv.referralCode || ''
+      if (referralCode && config.whatsappNumber) {
+        const { bodyText, ctaUrl } = buildReferralMessage(name, referralCode, config.whatsappNumber)
+        await saveMessage(phone, 'assistant', `${bodyText}\n\n${ctaUrl}`)
+        if (channel === 'whatsapp') {
+          await sendHuman(phone, bodyText)
+          try {
+            await sendCtaButton(phone, 'Compartilhe com amigos:', 'Indicar agora', ctaUrl)
+          } catch {
+            await sendWithTyping(phone, `🔗 ${ctaUrl}`, 400)
+          }
+        }
+      }
+    } catch (err) {
+      log.error('erro no fluxo de story', err, { phone, step: 'story' })
+      await responder(phone, channel, 'Foto recebida! Tive um probleminha ao gerar a imagem — tenta mandar de novo daqui a pouco 😅')
+    }
+  }
+
+  if (conv.hasCompanion) {
+    // Guia ativa: narra a foto e adiciona ao mural
+    const narration = await addPhotoToMuralWithNarration(phone, photoUrl, buffer, tipo)
+    if (narration) await responder(phone, channel, narration, 1200)
+  } else if (!fazStory) {
+    await responder(phone, channel, conv.hasPaid
+      ? 'Foto salva 📸 Com a Sol Guia eu narro cada momento e monto um mural de memórias da sua viagem.'
+      : 'Foto salva 📸')
+    if (conv.hasPaid && hasTripActive(conv.departureDate, true)) await enviarPerguntaGuia(phone, channel)
+  }
 }
 
 // ----------------------------------------------------------------

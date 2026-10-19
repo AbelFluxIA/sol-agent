@@ -1,22 +1,19 @@
 import { Router, Request, Response } from 'express'
-import OpenAI from 'openai'
-import { toFile } from 'openai'
-import { processMessage, generateAndSendItinerary, responderOfertaGuia } from '../agents/sol.agent'
+import { processMessage, generateAndSendItinerary, responderOfertaGuia, receberFoto } from '../agents/sol.agent'
 import { canalAtual } from '../services/canal.service'
 import { trackOperation } from '../shutdown'
 import fs from 'fs'
 import path from 'path'
 import { getOrCreateConversation, updateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit, saveMessage } from '../services/database.service'
 import { markAsRead, downloadMedia, sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
-import { watermarkImage, watermarkVideo } from '../services/watermark.service'
-import { addPhotoToMuralWithNarration } from '../services/mural.service'
+import { watermarkVideo } from '../services/watermark.service'
+import { transcribeAudio } from '../services/media.service'
 import { generateStoryImage, uploadStoryImage } from '../services/story.service'
 import { buildGuiaActivatedMessage, buildReferralMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
 import { config } from '../config'
 
 const router = Router()
-const openai = new OpenAI({ apiKey: config.openai.apiKey })
 
 // Map de timers de story — se o usuário não mandar foto em 10 min, gera sem foto
 const storyTimers = new Map<string, NodeJS.Timeout>()
@@ -99,96 +96,6 @@ function scheduleProcess(phone: string): void {
 }
 
 // ----------------------------------------------------------------
-// Transcreve áudio usando Whisper
-// ----------------------------------------------------------------
-async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<string> {
-  const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'ogg'
-  const file = await toFile(buffer, `audio.${ext}`, { type: mimeType })
-  const result = await openai.audio.transcriptions.create({
-    file,
-    model: 'whisper-1',
-    language: 'pt',
-  })
-  return result.text
-}
-
-// ----------------------------------------------------------------
-// Salva foto enviada pelo cliente no Supabase Storage e no perfil
-// Se hasCompanion=true, também adiciona ao mural com narração da Sol
-// ----------------------------------------------------------------
-async function saveCustomerPhoto(phone: string, mediaId: string, hasCompanion: boolean): Promise<void> {
-  const { buffer: rawBuffer, mimeType } = await downloadMedia(mediaId)
-
-  // Aplica marca d'água da Sol antes de salvar
-  let buffer = rawBuffer
-  const today = new Date().toLocaleDateString('pt-BR')
-  try {
-    buffer = await watermarkImage(rawBuffer, today)
-    log.info('marca d\'água aplicada', { phone, step: 'watermark' })
-  } catch (err) {
-    log.warn('falha ao aplicar marca d\'água, salvando original', { phone, step: 'watermark', data: { error: (err as Error).message } })
-    buffer = rawBuffer
-  }
-
-  const ext = 'jpg' // watermark sempre retorna JPEG
-  const fileName = `customer-photos/${phone}/${Date.now()}.${ext}`
-
-  const supabaseUrl = config.supabase?.url || process.env.SUPABASE_URL!
-  const serviceKey  = (config.supabase as any)?.serviceKey || process.env.SUPABASE_SERVICE_KEY!
-
-  // Upload para Supabase Storage
-  const uploadRes = await fetch(`${supabaseUrl}/storage/v1/object/${fileName}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${serviceKey}`,
-      'Content-Type': mimeType,
-    },
-    body: buffer,
-  })
-
-  if (!uploadRes.ok) {
-    const err = await uploadRes.text()
-    throw new Error(`Upload falhou: ${err}`)
-  }
-
-  const photoUrl = `${supabaseUrl}/storage/v1/object/public/${fileName}`
-
-  // Salva na tabela customer_photos
-  await fetch(`${supabaseUrl}/rest/v1/customer_photos`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${serviceKey}`,
-      apikey: serviceKey,
-      Prefer: 'return=minimal',
-    },
-    body: JSON.stringify({ phone, photo_url: photoUrl, whatsapp_media_id: mediaId }),
-  })
-
-  // Adiciona URL ao array photos do customers
-  await fetch(`${supabaseUrl}/rest/v1/rpc/append_customer_photo`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${serviceKey}`,
-      apikey: serviceKey,
-    },
-    body: JSON.stringify({ p_phone: phone, p_url: photoUrl }),
-  })
-
-  log.info('foto salva', { phone, step: 'save-photo', data: { photoUrl } })
-
-  // Se tem acompanhante: narração da Sol + adiciona ao mural de memórias
-  if (hasCompanion) {
-    const narration = await addPhotoToMuralWithNarration(phone, photoUrl, buffer, mimeType)
-    if (narration) {
-      await saveMessage(phone, 'assistant', narration)
-      await sendWithTyping(phone, narration, 1200)
-    }
-  }
-}
-
-// ----------------------------------------------------------------
 // GET /webhook/whatsapp — verificação inicial da Meta
 // ----------------------------------------------------------------
 router.get('/webhook/whatsapp', (req: Request, res: Response) => {
@@ -248,71 +155,18 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
       const mediaId = messageObj.image?.id
       if (!mediaId) return
       log.info('foto recebida', { phone, step: 'save-photo' })
-      const convForPhoto = await getOrCreateConversation(phone)
-
-      // Story photo flow: user paid or guia active, itinerary exists, no story yet
-      if (convForPhoto.hasPaid || convForPhoto.hasCompanion) {
-        const latestItinerary = await getLatestItinerary(phone)
-        if (latestItinerary && !latestItinerary.storyPhotoUrl) {
-          saveCustomerPhoto(phone, mediaId, convForPhoto.hasCompanion).catch(err =>
-            log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
-          )
-          const name = convForPhoto.name || 'Viajante'
-          const destination = convForPhoto.destination || ''
-          try {
-            const { buffer: userBuffer } = await downloadMedia(mediaId)
-            await sendWithTyping(phone, 'Recebida! Montando sua foto personalizada... ✨', 600)
-            // Cancela o timer de auto-story pois o usuário mandou a foto a tempo
+      try {
+        const { buffer, mimeType } = await downloadMedia(mediaId)
+        await receberFoto(phone, buffer, mimeType, 'whatsapp', {
+          mediaId,
+          // Cancela o timer de auto-story pois o usuário mandou a foto a tempo
+          aoComecarStory: () => {
             const pendingTimer = storyTimers.get(phone)
             if (pendingTimer) { clearTimeout(pendingTimer); storyTimers.delete(phone) }
-
-            const storyBuffer = await generateStoryImage(name, destination, userBuffer)
-            if (storyBuffer) {
-              const storyUrl = await uploadStoryImage(phone, storyBuffer)
-              if (storyUrl) {
-                await updateItinerary(latestItinerary.id, { storyPhotoUrl: storyUrl })
-                await sendImage(phone, storyUrl, `Roteiro para ${destination} — ${name} ✈️`)
-                const referralCode = convForPhoto.referralCode || ''
-                if (referralCode && config.whatsappNumber) {
-                  const { bodyText, ctaUrl } = buildReferralMessage(name, referralCode, config.whatsappNumber)
-                  await sendHuman(phone, bodyText)
-                  try {
-                    await sendCtaButton(phone, 'Compartilhe com amigos:', 'Indicar agora', ctaUrl)
-                  } catch {
-                    await sendWithTyping(phone, `🔗 ${ctaUrl}`, 400)
-                  }
-                }
-              } else {
-                await sendWithTyping(phone, 'Foto recebida! Tive um probleminha ao gerar a imagem — tenta mandar de novo daqui a pouco 😅', 800)
-              }
-            } else {
-              await sendWithTyping(phone, 'Foto recebida! Tive um probleminha ao gerar a imagem — tenta mandar de novo daqui a pouco 😅', 800)
-            }
-          } catch (err) {
-            log.error('erro no fluxo de story', err, { phone, step: 'story' })
-            await sendWithTyping(phone, 'Foto recebida! Tive um probleminha ao gerar a imagem — tenta mandar de novo daqui a pouco 😅', 800)
-          }
-          return
-        }
-      }
-
-      if (convForPhoto.hasCompanion) {
-        // Guia ativa: narra a foto e adiciona ao mural
-        saveCustomerPhoto(phone, mediaId, true).catch(err =>
-          log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
-        )
-      } else {
-        // Sem guia: salva silenciosamente + manda ack se já tem roteiro
-        saveCustomerPhoto(phone, mediaId, false).catch(err =>
-          log.error('erro ao salvar foto', err, { phone, step: 'save-photo' })
-        )
-        if (convForPhoto.hasPaid) {
-          await sendWithTyping(
-            phone,
-            'Foto recebida e salva 📸 Com a Sol Guia eu narro cada momento e monto um mural de memórias da sua viagem. Quer ativar?',
-            800
-          )
-        }
+          },
+        })
+      } catch (err) {
+        log.error('erro ao receber foto', err, { phone, step: 'save-photo' })
       }
       return
     } else if (type === 'video') {

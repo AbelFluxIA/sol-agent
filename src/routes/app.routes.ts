@@ -1,8 +1,10 @@
-import { Router, Request, Response, NextFunction } from 'express'
+import express, { Router, Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import { getOrCreateConversation, getLatestItinerary, getAccountStats, getRecentMessages, updateConversation, resolvePhone, listItineraries, getItineraryForPhone } from '../services/database.service'
 import { sendWithTyping } from '../services/whatsapp.service'
-import { processMessage, responderOfertaGuia } from '../agents/sol.agent'
+import { processMessage, responderOfertaGuia, receberFoto } from '../agents/sol.agent'
+import { transcribeAudio } from '../services/media.service'
+import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
 import { log } from '../logger'
 
@@ -221,6 +223,59 @@ router.post('/api/app/chat', clientAuthMiddleware, async (req: Request, res: Res
     res.status(500).json({ error: 'Erro ao processar mensagem' })
   }
 })
+
+// ─── POST /api/app/chat/audio ────────────────────────────────────────────────
+// Áudio gravado no chat do app (corpo = o arquivo; Content-Type = audio/webm,
+// audio/mp4...). Vira texto e segue como mensagem normal para a Sol.
+router.post(
+  '/api/app/chat/audio',
+  clientAuthMiddleware,
+  express.raw({ type: ['audio/*', 'video/webm', 'video/mp4', 'application/octet-stream'], limit: '15mb' }),
+  async (req: Request, res: Response) => {
+    const phone = (req as any).clientPhone as string
+    const audio = req.body
+    if (!Buffer.isBuffer(audio) || audio.length < 500) { res.status(400).json({ error: 'Áudio vazio' }); return }
+    const mimeType = String(req.headers['content-type'] || 'audio/webm').split(';')[0]
+    try {
+      const texto = (await log.timed(phone, 'whisper-transcribe', () => transcribeAudio(audio, mimeType))).trim()
+      if (!texto) { res.json({ texto: '', reply: 'Não consegui entender o áudio. Pode gravar de novo?' }); return }
+      cancelGuiaReminder(phone)
+      const reply = await processMessage(phone, texto, 'app')
+      res.json({ texto, reply: reply ?? 'Tudo certo!' })
+    } catch (err) {
+      log.error('erro no áudio do app', err, { phone, step: 'app-audio' })
+      res.status(500).json({ error: 'Erro ao processar o áudio' })
+    }
+  },
+)
+
+// ─── POST /api/app/chat/foto ─────────────────────────────────────────────────
+// Foto enviada no chat do app (corpo = a imagem). Mesmo fluxo do WhatsApp:
+// salva, vira imagem para os stories, entra no mural com a Sol Guia.
+// Responde assim que a foto fica salva; o resto aparece no chat em seguida.
+router.post(
+  '/api/app/chat/foto',
+  clientAuthMiddleware,
+  express.raw({ type: 'image/*', limit: '15mb' }),
+  async (req: Request, res: Response) => {
+    const phone = (req as any).clientPhone as string
+    const foto = req.body
+    if (!Buffer.isBuffer(foto) || foto.length < 500) { res.status(400).json({ error: 'Foto vazia' }); return }
+    const mimeType = String(req.headers['content-type'] || 'image/jpeg').split(';')[0]
+    try {
+      cancelGuiaReminder(phone)
+      let avisarSalva: (url: string) => void = () => {}
+      const salva = new Promise<string>((ok) => { avisarSalva = ok })
+      const tudo = trackOperation('foto-app', () => receberFoto(phone, foto, mimeType, 'app', { aoSalvar: avisarSalva }))
+      tudo.catch(err => log.error('erro no fluxo da foto do app', err, { phone, step: 'app-foto' }))
+      const photoUrl = await Promise.race([salva, tudo.then(() => '')])
+      res.json({ ok: true, photoUrl })
+    } catch (err) {
+      log.error('erro ao salvar foto do app', err, { phone, step: 'app-foto' })
+      res.status(500).json({ error: 'Erro ao salvar a foto' })
+    }
+  },
+)
 
 // ─── GET /api/app/roteiro ────────────────────────────────────────────────────
 // Retorna o texto completo do roteiro para renderização no app
