@@ -44,9 +44,15 @@ async function bootstrap() {
     await prisma.$connect()
     log.info('banco de dados conectado', { step: 'bootstrap' })
 
-    startDailyJobs()
+    // DISABLE_DAILY_JOBS=true: não manda os avisos agendados pelo WhatsApp. Usado
+    // enquanto outra instância (o servidor antigo) ainda cuida do WhatsApp, para
+    // ninguém receber mensagem em dobro.
+    if (process.env.DISABLE_DAILY_JOBS === 'true') log.info('envios agendados desligados (DISABLE_DAILY_JOBS)', { step: 'bootstrap' })
+    else startDailyJobs()
 
-    app.listen(config.port, () => {
+    // HOST: escuta só nesse endereço (ex.: a rede interna do Docker, atrás do Traefik)
+    const host = process.env.HOST || '::'
+    app.listen(config.port, host, () => {
       process.stdout.write(`\n☀️  Sol Agent rodando!\n   → Local: http://localhost:${config.port}\n   → Health: http://localhost:${config.port}/health\n   → Webhook WhatsApp: POST /webhook/whatsapp\n   → Webhook Pagamento: POST /webhook/payment\n   → Webhook Companion: POST /webhook/payment-companion\n   → Logs: GET /internal/logs\n\n`)
     })
   } catch (error) {
