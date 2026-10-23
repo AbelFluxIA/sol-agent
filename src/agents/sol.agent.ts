@@ -580,20 +580,7 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   // DEMO_FREE_MODE (temporário): trata como se tivesse crédito, sem descontar nada de verdade
   const hasFreeCredit = config.demoFreeMode || await checkAndDeductCredit(phone, resolvedName)
 
-  if (hasFreeCredit) {
-    await createItinerary(phone, days)
-    const freeMsg = await responder(phone, channel, buildFreeItineraryMessage(resolvedName), 1000)
-    if (channel === 'app') {
-      // No app a geração roda em segundo plano (leva mais de um minuto);
-      // as mensagens aparecem no chat do app conforme ficam prontas.
-      trackOperation('generate-itinerary', () => generateAndSendItinerary(phone, days, 'app')).catch(err =>
-        log.error('erro ao gerar roteiro pelo app', err, { phone })
-      )
-      return freeMsg
-    }
-    await generateAndSendItinerary(phone, days, 'whatsapp')
-    return undefined as any
-  }
+  if (hasFreeCredit) return gerarSemCobrar(phone, days, resolvedName, channel)
 
   // Sem créditos — cobra
   const prices = PRICES[days as ValidDays]
@@ -609,6 +596,22 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
 
   const { bodyText } = buildPaymentMessage(resolvedName, days, prices.original, prices.discounted)
   return enviarPagamento(phone, channel, bodyText, paymentLink)
+}
+
+// Roteiro sem cobrança (crédito grátis ou DEMO_FREE_MODE)
+async function gerarSemCobrar(phone: string, days: number, name: string, channel: Canal): Promise<string> {
+  await createItinerary(phone, days)
+  const freeMsg = await responder(phone, channel, buildFreeItineraryMessage(name), 1000)
+  if (channel === 'app') {
+    // No app a geração roda em segundo plano (leva mais de um minuto);
+    // as mensagens aparecem no chat do app conforme ficam prontas.
+    trackOperation('generate-itinerary', () => generateAndSendItinerary(phone, days, 'app')).catch(err =>
+      log.error('erro ao gerar roteiro pelo app', err, { phone })
+    )
+    return freeMsg
+  }
+  await generateAndSendItinerary(phone, days, 'whatsapp')
+  return undefined as any
 }
 
 // Mensagem de pagamento: no WhatsApp vai com botão; no app o link fica no texto
@@ -633,6 +636,12 @@ async function handleRoteiroPersonalizado(
 ): Promise<string> {
   const { dias_roteiro } = args
   const days = dias_roteiro as ValidDays
+
+  // DEMO_FREE_MODE (temporário): roteiro novo também sai sem cobrança
+  if (config.demoFreeMode) {
+    const conv = await getOrCreateConversation(phone)
+    return gerarSemCobrar(phone, days, conv.name || 'você', channel)
+  }
 
   const prices = PRICES[days]
   const paymentLink = config.paymentLinks[days]
