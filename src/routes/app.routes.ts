@@ -6,6 +6,7 @@ import { processMessage, responderOfertaGuia, receberFoto } from '../agents/sol.
 import { transcribeAudio } from '../services/media.service'
 import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
+import { getAlbum } from '../services/album.service'
 import { log } from '../logger'
 
 const router = Router()
@@ -310,6 +311,18 @@ router.get('/api/app/roteiros', clientAuthMiddleware, async (req: Request, res: 
     res.json({ roteiros: await listItineraries(phone) })
   } catch (err) {
     log.error('erro ao listar roteiros do app', err, { phone, step: 'app-roteiros' })
+    res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+// ─── GET /api/app/album ──────────────────────────────────────────────────────
+// Todas as fotos da pessoa, por viagem, com o comentário da Sol quando houver
+router.get('/api/app/album', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  try {
+    res.json(await getAlbum(phone))
+  } catch (err) {
+    log.error('erro ao montar o álbum do app', err, { phone, step: 'app-album' })
     res.status(500).json({ error: 'Erro interno' })
   }
 })

@@ -47,7 +47,18 @@ async function supabasePatch(table: string, filter: string, body: object) {
   if (!res.ok) throw new Error(`Supabase PATCH ${table} falhou: ${await res.text()}`)
 }
 
-async function getOrCreateMural(phone: string, name: string, destination: string): Promise<{ id: string; shareCode: string }> {
+// Várias fotos chegando juntas criavam murais duplicados: um de cada vez por telefone
+const muralEmCriacao = new Map<string, Promise<{ id: string; shareCode: string }>>()
+
+function getOrCreateMural(phone: string, name: string, destination: string): Promise<{ id: string; shareCode: string }> {
+  const emAndamento = muralEmCriacao.get(phone)
+  if (emAndamento) return emAndamento
+  const tarefa = buscarOuCriarMural(phone, name, destination).finally(() => muralEmCriacao.delete(phone))
+  muralEmCriacao.set(phone, tarefa)
+  return tarefa
+}
+
+async function buscarOuCriarMural(phone: string, name: string, destination: string): Promise<{ id: string; shareCode: string }> {
   const existing = await supabaseGet('photo_murals', `phone=eq.${encodeURIComponent(phone)}&order=created_at.desc&limit=1`)
 
   if (existing && existing.length > 0) {
