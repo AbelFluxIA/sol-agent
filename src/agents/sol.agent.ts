@@ -742,7 +742,6 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
   const conversation = await getOrCreateConversation(phone)
 
   const {
-    name,
     destination,
     arrivalDate,
     departureDate,
@@ -753,9 +752,12 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
     touristProfile,
     groupType,
   } = conversation
+  // Pedido pelo app pode vir sem o nome (a tela não pergunta): não trava a geração
+  const name = conversation.name || 'Viajante'
 
-  if (!name || !arrivalDate || !departureDate) {
-    log.error('dados incompletos para gerar roteiro', new Error('missing fields'), { phone, data: { name, arrivalDate, departureDate } })
+  if (!arrivalDate || !departureDate) {
+    log.error('dados incompletos para gerar roteiro', new Error('missing fields'), { phone, data: { arrivalDate, departureDate } })
+    await responder(phone, channel, 'Faltou a data da viagem para eu montar o roteiro. Me conta quando você chega e quando volta? 😊')
     return
   }
 

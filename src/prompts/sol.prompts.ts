@@ -473,7 +473,8 @@ Qualquer dúvida é só falar. Aproveita a viagem! 🌅`
 }
 
 export function buildFreeItineraryMessage(name: string): string {
-  return `*${name}*, você tem um roteiro gratuito disponível! Já estou preparando tudo pra você ✨`
+  const quem = name && name !== 'você' ? `*${name}*, você tem` : 'Você tem'
+  return `${quem} um roteiro gratuito disponível! Já estou preparando tudo pra você ✨`
 }
 
 export function buildReferralMessage(name: string, referralCode: string, whatsappNumber: string): { bodyText: string; ctaUrl: string } {
