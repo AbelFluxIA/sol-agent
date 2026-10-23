@@ -9,6 +9,7 @@ import { transcribeAudio } from '../services/media.service'
 import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
 import { getAlbum } from '../services/album.service'
+import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
 import { log } from '../logger'
 
 const router = Router()
@@ -395,6 +396,25 @@ router.post(
     }
   },
 )
+
+// ─── GET /api/app/sugestoes ──────────────────────────────────────────────────
+// "Para onde ir": destinos recomendados para a pessoa, perto de onde ela está
+// (?lat=&lng=), da cidade informada (?cidade=) ou da última viagem.
+router.get('/api/app/sugestoes', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const lat = Number(req.query.lat)
+  const lng = Number(req.query.lng)
+  try {
+    let base: string | null = null
+    if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) base = await cidadeDaPosicao(lat, lng)
+    if (!base && typeof req.query.cidade === 'string' && req.query.cidade.trim()) base = req.query.cidade.trim().slice(0, 80)
+    if (!base) base = (await getOrCreateConversation(phone)).destination || 'João Pessoa - PB'
+    res.json({ base, sugestoes: await recomendarDestinos(phone, base) })
+  } catch (err) {
+    log.error('erro nas sugestões de destino', err, { phone, step: 'app-sugestoes' })
+    res.status(503).json({ error: 'Sugestões indisponíveis agora' })
+  }
+})
 
 // ─── GET /api/app/album ──────────────────────────────────────────────────────
 // Todas as fotos da pessoa, por viagem, com o comentário da Sol quando houver
