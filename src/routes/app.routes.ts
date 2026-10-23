@@ -2,7 +2,9 @@ import express, { Router, Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import { getOrCreateConversation, getLatestItinerary, getAccountStats, getRecentMessages, updateConversation, resolvePhone, listItineraries, getItineraryForPhone } from '../services/database.service'
 import { sendWithTyping } from '../services/whatsapp.service'
-import { processMessage, responderOfertaGuia, receberFoto } from '../agents/sol.agent'
+import { processMessage, responderOfertaGuia, receberFoto, criarRoteiroPeloApp, PedidoRoteiroApp } from '../agents/sol.agent'
+import { traduzir, IDIOMAS } from '../services/traducao.service'
+import { config } from '../config'
 import { transcribeAudio } from '../services/media.service'
 import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
@@ -148,6 +150,16 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
       destination: conv.destination,
       arrivalDate: conv.arrivalDate,
       departureDate: conv.departureDate,
+      arrivalTime: conv.arrivalTime,
+      departureTime: conv.departureTime,
+      originCity: conv.originCity,
+      groupType: conv.groupType,
+      touristProfile: conv.touristProfile,
+      // Condições comerciais atuais (o app mostra; quem decide é o bot)
+      ofertas: {
+        gratisDuranteTeste: config.demoFreeMode,
+        guiaPreco: config.demoFreeMode ? 'Grátis durante o teste' : 'R$ 29,90 para toda a viagem',
+      },
       hasPaid: conv.hasPaid,
       hasCompanion: conv.hasCompanion,
       freeCredits: conv.freeCredits,
@@ -314,6 +326,75 @@ router.get('/api/app/roteiros', clientAuthMiddleware, async (req: Request, res: 
     res.status(500).json({ error: 'Erro interno' })
   }
 })
+
+// ─── POST /api/app/roteiros/criar ────────────────────────────────────────────
+// Tela "Criar roteiro": gera um roteiro a partir do formulário. A geração roda
+// em segundo plano; o app acompanha pela lista de roteiros.
+router.post('/api/app/roteiros/criar', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const b = req.body ?? {}
+  const data = /^\d{4}-\d{2}-\d{2}$/
+  const hora = /^\d{2}:\d{2}$/
+  if (typeof b.destino !== 'string' || b.destino.trim().length < 2 || !data.test(b.chegada) || !data.test(b.saida) || b.saida < b.chegada) {
+    res.status(400).json({ error: 'Confira destino e datas' }); return
+  }
+  const pedido: PedidoRoteiroApp = {
+    destino: b.destino.trim().slice(0, 80),
+    chegada: b.chegada,
+    saida: b.saida,
+    horaChegada: hora.test(b.horaChegada) ? b.horaChegada : undefined,
+    horaVolta: hora.test(b.horaVolta) ? b.horaVolta : undefined,
+    quemVai: ['sozinho', 'casal', 'família', 'amigos'].includes(b.quemVai) ? b.quemVai : 'sozinho',
+    pessoas: Number.isInteger(b.pessoas) ? Math.min(Math.max(b.pessoas, 1), 20) : undefined,
+    criancas: Number.isInteger(b.criancas) ? Math.min(Math.max(b.criancas, 0), 6) : undefined,
+    tipos: Array.isArray(b.tipos) ? b.tipos.filter((t: unknown) => typeof t === 'string').slice(0, 3).map((t: string) => t.slice(0, 40)) : [],
+    custos: ['econômico', 'melhor custo-benefício', 'conforto'].includes(b.custos) ? b.custos : 'melhor custo-benefício',
+    hospedagem: typeof b.hospedagem === 'string' && b.hospedagem.trim() ? b.hospedagem.trim().slice(0, 120) : undefined,
+    origem: typeof b.origem === 'string' && b.origem.trim() ? b.origem.trim().slice(0, 80) : undefined,
+  }
+  try {
+    const antes = (await listItineraries(phone)).length
+    const reply = await criarRoteiroPeloApp(phone, pedido)
+    res.json({ reply, roteirosAntes: antes })
+  } catch (err) {
+    log.error('erro ao criar roteiro pelo app', err, { phone, step: 'app-criar-roteiro' })
+    res.status(500).json({ error: 'Não consegui pedir o roteiro agora' })
+  }
+})
+
+// ─── POST /api/app/traduzir ──────────────────────────────────────────────────
+router.post('/api/app/traduzir', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const { texto, para, de } = req.body ?? {}
+  if (typeof texto !== 'string' || !texto.trim() || texto.length > 2000) { res.status(400).json({ error: 'Texto vazio ou longo demais' }); return }
+  if (typeof para !== 'string' || !IDIOMAS[para]) { res.status(400).json({ error: 'Idioma não suportado' }); return }
+  try {
+    res.json(await traduzir(texto.trim(), para, typeof de === 'string' ? de : undefined))
+  } catch (err) {
+    log.error('erro ao traduzir', err, { phone, step: 'app-traduzir' })
+    res.status(500).json({ error: 'Não consegui traduzir agora' })
+  }
+})
+
+// ─── POST /api/app/transcrever ───────────────────────────────────────────────
+// Só transcreve (tradutor e "falar o pedido"); não manda nada para a Sol
+router.post(
+  '/api/app/transcrever',
+  clientAuthMiddleware,
+  express.raw({ type: ['audio/*', 'video/webm', 'video/mp4', 'application/octet-stream'], limit: '15mb' }),
+  async (req: Request, res: Response) => {
+    const phone = (req as any).clientPhone as string
+    const audio = req.body
+    if (!Buffer.isBuffer(audio) || audio.length < 500) { res.status(400).json({ error: 'Áudio vazio' }); return }
+    const mimeType = String(req.headers['content-type'] || 'audio/webm').split(';')[0]
+    try {
+      res.json({ texto: (await transcribeAudio(audio, mimeType)).trim() })
+    } catch (err) {
+      log.error('erro ao transcrever', err, { phone, step: 'app-transcrever' })
+      res.status(500).json({ error: 'Não consegui entender o áudio' })
+    }
+  },
+)
 
 // ─── GET /api/app/album ──────────────────────────────────────────────────────
 // Todas as fotos da pessoa, por viagem, com o comentário da Sol quando houver

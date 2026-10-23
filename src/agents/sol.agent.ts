@@ -537,6 +537,55 @@ async function handleBuscarSugestaoConfiavel(phone: string, args: BuscarSugestao
 }
 
 // ----------------------------------------------------------------
+// Roteiro pedido pela tela "Criar roteiro" do app (formulário, sem conversa).
+// Fica registrado na conversa como se a pessoa tivesse pedido no chat, e segue
+// o mesmo caminho da ferramenta gerar_roteiro_de_viagem (no canal do app).
+// ----------------------------------------------------------------
+export interface PedidoRoteiroApp {
+  destino: string
+  chegada: string        // AAAA-MM-DD
+  saida: string          // AAAA-MM-DD
+  horaChegada?: string   // HH:MM
+  horaVolta?: string     // HH:MM
+  quemVai: string        // "sozinho", "casal", "família", "amigos"
+  pessoas?: number
+  criancas?: number
+  tipos: string[]        // ex.: ["Natureza (praia)", "Gastronomia"]
+  custos: string         // "econômico", "melhor custo-benefício", "conforto"
+  hospedagem?: string
+  origem?: string
+}
+
+export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp): Promise<string> {
+  marcarCanal(phone, 'app')
+  cancelGuiaReminder(phone)
+  const conv = await getOrCreateConversation(phone)
+  const grupo = p.quemVai === 'família' && p.criancas
+    ? `família com ${p.criancas} ${p.criancas === 1 ? 'criança' : 'crianças'}`
+    : p.pessoas && p.pessoas > 1 && p.quemVai !== 'casal' ? `${p.quemVai} (${p.pessoas} pessoas)` : p.quemVai
+  const tipos = p.tipos.length ? p.tipos.join(', ') : 'lazer geral'
+  const resumo = [
+    `📝 Pedido de roteiro pelo app: ${p.destino}`,
+    `${p.chegada}${p.horaChegada ? ` ${p.horaChegada}` : ''} a ${p.saida}${p.horaVolta ? ` ${p.horaVolta}` : ''}`,
+    `${grupo} · ${tipos} · ${p.custos}`,
+    p.hospedagem ? `Hospedagem: ${p.hospedagem}` : 'Sem hospedagem definida',
+  ].join('\n')
+  await saveMessage(phone, 'user', resumo)
+  return handleGerarRoteiro(phone, {
+    destino: p.destino,
+    data_chegada: p.chegada,
+    data_saida: p.saida,
+    horario_chegada: p.horaChegada || '09:00',
+    perfil_do_turista: `Turista de lazer, ${grupo}, foco em ${tipos}, orçamento ${p.custos}`,
+    sozinho_ou_acompanhado: grupo,
+    nome_turista: conv.name || 'não informado',
+    hotel_hospedagem: p.hospedagem || 'não informado',
+    horario_volta: p.horaVolta || 'não informado',
+    cidade_origem: p.origem || 'não informado',
+  }, 'app')
+}
+
+// ----------------------------------------------------------------
 // Handler: gerar_roteiro_de_viagem
 // ----------------------------------------------------------------
 async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel: Canal = 'whatsapp'): Promise<string> {
