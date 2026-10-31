@@ -148,6 +148,15 @@ export async function saveMessage(
   })
 }
 
+// Mensagens que a pessoa mandou hoje (dia de Brasília), somando app e WhatsApp
+export async function contarMensagensDeHoje(phone: string): Promise<number> {
+  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  if (!conversation) return 0
+  const hoje = new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' })
+  const inicio = new Date(`${hoje}T00:00:00-03:00`)
+  return prisma.message.count({ where: { conversationId: conversation.id, role: 'user', createdAt: { gte: inicio } } })
+}
+
 // Busca as últimas N mensagens (para o contexto do LLM)
 // Padrão: 20 mensagens — suficiente para contexto sem gastar tokens demais
 export async function getRecentMessages(phone: string, limit = 20) {

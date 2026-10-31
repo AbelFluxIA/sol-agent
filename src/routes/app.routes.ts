@@ -161,8 +161,9 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
       // Condições comerciais atuais (o app mostra; quem decide é o bot)
       ofertas: {
         gratisDuranteTeste: config.demoFreeMode,
-        guiaPreco: config.demoFreeMode ? 'Grátis durante o teste' : 'R$ 29,90 para toda a viagem',
+        guiaPreco: config.demoFreeMode ? 'Grátis durante o teste' : `A partir de R$ ${config.regras.guiaPrecoDia.toFixed(2).replace('.', ',')} por dia`,
       },
+      regras: config.regras,
       hasPaid: conv.hasPaid,
       hasCompanion: conv.hasCompanion,
       freeCredits: conv.freeCredits,

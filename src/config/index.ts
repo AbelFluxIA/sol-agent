@@ -46,6 +46,21 @@ export const config = {
     webhookSecret: process.env.ABACATEPAY_WEBHOOK_SECRET || '',
   },
 
+  // Parâmetros de negócio (Regras Vigentes do app, seção Parâmetros). Mudam por
+  // variável de ambiente, sem nova versão do app; o app só mostra.
+  regras: {
+    roteirosGratisSemana: Number(process.env.FREE_ROTEIROS_PER_WEEK ?? 2),
+    diaRoteiroPreco: Number(process.env.ROTEIRO_DAY_PRICE_BRL ?? 4.9),
+    maxDiasSemGuia: Number(process.env.ROTEIRO_MAX_DAYS ?? 5),
+    guiaRoteirosSemana: Number(process.env.GUIA_ROTEIROS_PER_WEEK ?? 30),
+    maxDiasComGuia: Number(process.env.GUIA_ROTEIRO_MAX_DAYS ?? 7),
+    guiaPrecoDia: Number(process.env.SOL_GUIA_PRICE_PER_DAY_BRL ?? 9.9),
+    guiaPrecoMes: Number(process.env.GUIA_MONTH_PRICE_BRL ?? 29.9),
+    chatMensagensDia: Number(process.env.SOL_CHAT_FREE_MESSAGES_PER_DAY ?? 30), // 0 desliga
+    guiaMensagensDia: Number(process.env.GUIA_MAX_MESSAGES_PER_DAY ?? 100),
+    tradutorMensagensDia: Number(process.env.TRANSLATE_MAX_MESSAGES_PER_DAY ?? 50),
+  },
+
   // Endereço público do app/painel (links de roteiro, mural e conta enviados ao cliente)
   appPublicUrl: (process.env.APP_PUBLIC_URL || 'https://painel.tripsol.com.br').replace(/\/+$/, ''),
 

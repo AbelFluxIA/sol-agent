@@ -20,6 +20,7 @@ import {
   getReferrerPhone,
   addFreeCredit,
   getAccountStats,
+  contarMensagensDeHoje,
 } from '../services/database.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
@@ -295,6 +296,20 @@ export async function processMessage(
 
   // 1. Garante que a conversa existe no banco
   const conversation = await getOrCreateConversation(phone)
+
+  // Conversa grátis (sem a Guia): limite de mensagens por dia, somando app e
+  // WhatsApp (RA-SOL-02). No limite a Sol avisa sem chamar a IA.
+  const limite = conversation.hasCompanion ? config.regras.guiaMensagensDia : config.regras.chatMensagensDia
+  if (limite > 0 && (await contarMensagensDeHoje(phone)) >= limite) {
+    await saveMessage(phone, 'user', userMessage)
+    const aviso = conversation.hasCompanion
+      ? `Você chegou ao limite de hoje da Guia Sol (${limite} mensagens). Amanhã eu volto a responder. Seu roteiro, o mapa e os telefones úteis continuam disponíveis. Em emergência, use o SOS ou ligue 190.`
+      : `Você chegou ao limite de ${limite} mensagens de hoje na conversa grátis. Amanhã eu volto a responder. Com a Guia Sol a conversa não tem esse limite. Em emergência, use o SOS ou ligue 190.`
+    log.info('limite diário de mensagens', { phone, data: { limite, channel } })
+    await responder(phone, channel, aviso)
+    if (channel === 'app') return aviso
+    return
+  }
   const profileContext = await buildProfileContext(phone, conversation)
 
   // Captura código de indicação se presente (ex: "Oi Sol! Vim pelo link de João (ref:ABC123)")
