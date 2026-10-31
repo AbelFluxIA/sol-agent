@@ -9,23 +9,13 @@ import { transcribeAudio } from '../services/media.service'
 import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
 import { getAlbum } from '../services/album.service'
+import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigo, telefoneDoPedido, pedidoExiste } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
 import { log } from '../logger'
 
 const router = Router()
 
 const JWT_SECRET = process.env.JWT_SECRET || 'sol-app-secret-change-me'
-
-// OTP em memória: phone → { code, expiresAt }
-const otpStore = new Map<string, { code: string; expiresAt: number }>()
-
-// Limpa OTPs expirados a cada 10 minutos
-setInterval(() => {
-  const now = Date.now()
-  for (const [phone, entry] of otpStore.entries()) {
-    if (entry.expiresAt < now) otpStore.delete(phone)
-  }
-}, 10 * 60 * 1000)
 
 // Normaliza telefone brasileiro: aceita (11) 99999-9999, +5511..., 11999... → 5511999999999
 function normalizePhone(raw: string): string {
@@ -72,8 +62,18 @@ export function clientAuthMiddleware(req: Request, res: Response, next: NextFunc
     })
 }
 
+// ─── POST /api/app/auth/pedido ──────────────────────────────────────────────
+// Primeiro login: o app abre o WhatsApp com a mensagem pronta para a Sol; ao
+// receber, a Sol responde só com o código (ver login.service).
+router.post('/api/app/auth/pedido', (_req: Request, res: Response) => {
+  if (!config.whatsappNumber) { res.status(503).json({ error: 'Número da Sol não configurado' }); return }
+  const pedido = criarPedido()
+  res.json({ pedido, whatsapp: config.whatsappNumber, texto: textoDoPedido(pedido) })
+})
+
 // ─── POST /api/app/auth/solicitar-otp ───────────────────────────────────────
-// Gera OTP de 6 dígitos e envia via WhatsApp
+// Envia o código pelo número digitado. Só chega se a pessoa falou com a Sol
+// nas últimas 24 h (regra do WhatsApp); o caminho principal é o pedido acima.
 router.post('/api/app/auth/solicitar-otp', async (req: Request, res: Response) => {
   const { phone: rawPhone } = req.body
   if (!rawPhone) { res.status(400).json({ error: 'Telefone obrigatório' }); return }
@@ -82,14 +82,12 @@ router.post('/api/app/auth/solicitar-otp', async (req: Request, res: Response) =
   if (typed.length < 12) { res.status(400).json({ error: 'Telefone inválido' }); return }
   // Usa o número da conversa que já existe no WhatsApp (com ou sem o 9)
   const phone = await resolvePhone(typed)
-
-  const code = Math.floor(100000 + Math.random() * 900000).toString()
-  otpStore.set(phone, { code, expiresAt: Date.now() + 5 * 60 * 1000 })
+  const code = gerarCodigo(phone)
 
   try {
     await sendWithTyping(
       phone,
-      `Seu código de acesso ao app Sol: *${code}*\n\nVálido por 5 minutos. Não compartilhe com ninguém.`,
+      `Seu código de acesso ao app Sol: *${code}*\n\nVálido por 10 minutos. Não compartilhe com ninguém.`,
       600
     )
     const conv = await getOrCreateConversation(phone)
@@ -102,25 +100,29 @@ router.post('/api/app/auth/solicitar-otp', async (req: Request, res: Response) =
 })
 
 // ─── POST /api/app/auth/verificar-otp ───────────────────────────────────────
-// Verifica OTP e retorna JWT
+// Confere o código ({ pedido, code } ou { phone, code }) e devolve o JWT
 router.post('/api/app/auth/verificar-otp', async (req: Request, res: Response) => {
-  const { phone: rawPhone, code } = req.body
-  if (!rawPhone || !code) { res.status(400).json({ error: 'Telefone e código obrigatórios' }); return }
+  const { phone: rawPhone, pedido, code } = req.body ?? {}
+  if (!code || (!rawPhone && !pedido)) { res.status(400).json({ error: 'Código obrigatório' }); return }
 
-  const phone = await resolvePhone(normalizePhone(rawPhone))
-  const entry = otpStore.get(phone)
-
-  if (!entry || entry.code !== String(code).trim() || Date.now() > entry.expiresAt) {
-    res.status(401).json({ error: 'Código inválido ou expirado' })
-    return
+  let phone: string | null = null
+  if (typeof pedido === 'string' && pedido) {
+    if (!pedidoExiste(pedido)) { res.status(401).json({ error: 'O pedido expirou. Toque em "Receber código no WhatsApp" de novo.' }); return }
+    phone = telefoneDoPedido(pedido)
+    if (!phone) { res.status(401).json({ error: 'A Sol ainda não recebeu sua mensagem no WhatsApp. Envie a mensagem e espere o código.' }); return }
+  } else {
+    phone = await resolvePhone(normalizePhone(String(rawPhone)))
   }
 
-  otpStore.delete(phone)
+  if (!conferirCodigo(phone, String(code))) {
+    res.status(401).json({ error: 'Código incorreto ou vencido. Confira o código que a Sol mandou.' })
+    return
+  }
 
   const conv = await getOrCreateConversation(phone)
   const token = jwt.sign({ phone, name: conv.name || '' }, JWT_SECRET, { expiresIn: '30d' })
 
-  log.info('login app realizado', { phone, step: 'app-auth' })
+  log.info('login app realizado', { phone, step: 'app-auth', data: { porPedido: !!pedido } })
   res.json({ token, name: conv.name || '', phone })
 })
 

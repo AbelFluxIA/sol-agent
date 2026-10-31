@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { processMessage, generateAndSendItinerary, responderOfertaGuia, receberFoto } from '../agents/sol.agent'
 import { canalAtual } from '../services/canal.service'
+import { tratarMensagemDeLogin } from '../services/login.service'
 import { trackOperation } from '../shutdown'
 import fs from 'fs'
 import path from 'path'
@@ -223,6 +224,9 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
     if (!text?.trim()) return
 
     log.info('texto recebido', { phone, data: { preview: text.substring(0, 80) } })
+
+    // Pedido de código para entrar no app: a Sol responde só com o código
+    if (type === 'text' && await tratarMensagemDeLogin(phone, text)) return
 
     cancelGuiaReminder(phone) // qualquer mensagem cancela o lembrete pendente
 
