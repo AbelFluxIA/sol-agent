@@ -482,6 +482,6 @@ export function buildReferralMessage(name: string, referralCode: string, whatsap
   const ctaUrl = `https://wa.me/${whatsappNumber}?text=${text}`
   const bodyText = `*${name}*, gostou do roteiro? Compartilha com quem vai viajar em breve! 🎁
 
-Cada amigo que contratar pelo seu link, você ganha *1 roteiro grátis* — válido pra qualquer destino.`
+Cada amigo que contratar pelo seu link, você ganha *1 roteiro grátis*, válido pra qualquer destino.`
   return { bodyText, ctaUrl }
 }

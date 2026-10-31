@@ -342,15 +342,23 @@ router.post('/api/app/roteiros/criar', clientAuthMiddleware, async (req: Request
   if (typeof b.destino !== 'string' || b.destino.trim().length < 2 || !data.test(b.chegada) || !data.test(b.saida) || b.saida < b.chegada) {
     res.status(400).json({ error: 'Confira destino e datas' }); return
   }
+  // Duração máxima: 5 dias sem a Guia, 7 com a Guia (RA-ROT-24)
+  const conv = await getOrCreateConversation(phone)
+  const maxDias = conv.hasCompanion ? config.regras.maxDiasComGuia : config.regras.maxDiasSemGuia
+  const dias = Math.round((Date.parse(`${b.saida}T12:00:00Z`) - Date.parse(`${b.chegada}T12:00:00Z`)) / 86400000) + 1
+  if (dias > maxDias) { res.status(400).json({ error: `O roteiro pode ter até ${maxDias} dias` }); return }
   const pedido: PedidoRoteiroApp = {
     destino: b.destino.trim().slice(0, 80),
     chegada: b.chegada,
     saida: b.saida,
     horaChegada: hora.test(b.horaChegada) ? b.horaChegada : undefined,
     horaVolta: hora.test(b.horaVolta) ? b.horaVolta : undefined,
-    quemVai: ['sozinho', 'casal', 'família', 'amigos'].includes(b.quemVai) ? b.quemVai : 'sozinho',
-    pessoas: Number.isInteger(b.pessoas) ? Math.min(Math.max(b.pessoas, 1), 20) : undefined,
+    quemVai: ['sozinho', 'casal', 'família'].includes(b.quemVai) ? b.quemVai : 'sozinho',
+    adultos: Number.isInteger(b.adultos) ? Math.min(Math.max(b.adultos, 1), 6) : undefined,
     criancas: Number.isInteger(b.criancas) ? Math.min(Math.max(b.criancas, 0), 6) : undefined,
+    pet: b.pet && typeof b.pet.tipo === 'string' && typeof b.pet.porte === 'string'
+      ? { tipo: b.pet.tipo.slice(0, 20), porte: b.pet.porte.slice(0, 20) }
+      : undefined,
     tipos: Array.isArray(b.tipos) ? b.tipos.filter((t: unknown) => typeof t === 'string').slice(0, 3).map((t: string) => t.slice(0, 40)) : [],
     custos: ['econômico', 'melhor custo-benefício', 'conforto'].includes(b.custos) ? b.custos : 'melhor custo-benefício',
     hospedagem: typeof b.hospedagem === 'string' && b.hospedagem.trim() ? b.hospedagem.trim().slice(0, 120) : undefined,

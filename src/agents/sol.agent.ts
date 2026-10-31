@@ -456,7 +456,7 @@ export async function receberFoto(
       const storyUrl = storyBuffer ? await uploadStoryImage(phone, storyBuffer) : null
       if (!storyUrl) throw new Error('story não gerado')
       await updateItinerary(latest.id, { storyPhotoUrl: storyUrl })
-      const legenda = `Roteiro para ${destination} — ${name} ✈️`
+      const legenda = `Roteiro para ${destination}, ${name} ✈️`
       await saveMessage(phone, 'assistant', `${legenda}\n${storyUrl}`)
       if (channel === 'whatsapp') await sendImage(phone, storyUrl, legenda)
       const referralCode = conv.referralCode || ''
@@ -474,7 +474,7 @@ export async function receberFoto(
       }
     } catch (err) {
       log.error('erro no fluxo de story', err, { phone, step: 'story' })
-      await responder(phone, channel, 'Foto recebida! Tive um probleminha ao gerar a imagem — tenta mandar de novo daqui a pouco 😅')
+      await responder(phone, channel, 'Foto recebida! Tive um probleminha ao gerar a imagem. Tenta mandar de novo daqui a pouco 😅')
     }
   }
 
@@ -547,7 +547,7 @@ async function handleBuscarSugestaoConfiavel(phone: string, args: BuscarSugestao
   const conversation = await getOrCreateConversation(phone)
   const contextHint = conversation.destination ? `Cliente está em viagem em ${conversation.destination}.` : undefined
   const result = await searchGroundedAnswer(args.pergunta, contextHint, phone)
-  const reply = result || 'Não consegui confirmar isso agora com segurança — tenta perguntar de um jeito mais específico ou dá uma olhada direto no Google Maps por perto.'
+  const reply = result || 'Não consegui confirmar isso agora com segurança. Tenta perguntar de um jeito mais específico ou dá uma olhada direto no Google Maps por perto.'
   return responder(phone, channel, reply)
 }
 
@@ -562,9 +562,10 @@ export interface PedidoRoteiroApp {
   saida: string          // AAAA-MM-DD
   horaChegada?: string   // HH:MM
   horaVolta?: string     // HH:MM
-  quemVai: string        // "sozinho", "casal", "família", "amigos"
-  pessoas?: number
+  quemVai: string        // "sozinho", "casal" ou "família" (RA-ROT-12)
+  adultos?: number
   criancas?: number
+  pet?: { tipo: string; porte: string }
   tipos: string[]        // ex.: ["Natureza (praia)", "Gastronomia"]
   custos: string         // "econômico", "melhor custo-benefício", "conforto"
   hospedagem?: string
@@ -575,9 +576,10 @@ export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp): P
   marcarCanal(phone, 'app')
   cancelGuiaReminder(phone)
   const conv = await getOrCreateConversation(phone)
-  const grupo = p.quemVai === 'família' && p.criancas
-    ? `família com ${p.criancas} ${p.criancas === 1 ? 'criança' : 'crianças'}`
-    : p.pessoas && p.pessoas > 1 && p.quemVai !== 'casal' ? `${p.quemVai} (${p.pessoas} pessoas)` : p.quemVai
+  const familia = p.quemVai === 'família'
+    ? `família com ${p.adultos ?? 2} ${(p.adultos ?? 2) === 1 ? 'adulto' : 'adultos'}${p.criancas ? ` e ${p.criancas} ${p.criancas === 1 ? 'criança' : 'crianças'} (até 12 anos)` : ''}`
+    : p.quemVai
+  const grupo = p.pet ? `${familia}, com pet (${p.pet.tipo.toLowerCase()}, porte ${p.pet.porte.toLowerCase()})` : familia
   const tipos = p.tipos.length ? p.tipos.join(', ') : 'lazer geral'
   const resumo = [
     `📝 Pedido de roteiro pelo app: ${p.destino}`,
@@ -740,7 +742,7 @@ async function handleConsultarCreditos(phone: string, channel: Canal = 'whatsapp
 
 🎁 *${freeCredits} roteiro${freeCredits !== 1 ? 's' : ''} grátis* disponíve${freeCredits !== 1 ? 'is' : 'l'}
 👥 *${totalReferrals} indicação${totalReferrals !== 1 ? 'ões' : ''}* feita${totalReferrals !== 1 ? 's' : ''}
-✅ *${convertedReferrals} convertida${convertedReferrals !== 1 ? 's' : ''}* — amigos que pagaram
+✅ *${convertedReferrals} convertida${convertedReferrals !== 1 ? 's' : ''}*: amigos que pagaram
 
 Veja o histórico completo: ${statsUrl}`
 
@@ -845,7 +847,7 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
     // Usa try/catch próprio — falha aqui não pode matar o envio do PDF
     if (shareCode) {
       const interactiveUrl = `${config.appPublicUrl}/r/${shareCode}`
-      const interactiveMsg = `Aqui está o seu roteiro interativo — marque cada atividade conforme for fazendo! ✅`
+      const interactiveMsg = `Aqui está o seu roteiro interativo. Marque cada atividade conforme for fazendo! ✅`
       await saveMessage(phone, 'assistant', `${interactiveMsg}\n${interactiveUrl}`)
       if (channel === 'whatsapp') {
         try {

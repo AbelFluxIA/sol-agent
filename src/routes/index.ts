@@ -36,7 +36,7 @@ async function runAutoStory(phone: string): Promise<void> {
     if (!storyUrl) return
 
     await updateItinerary(latestIt.id, { storyPhotoUrl: storyUrl })
-    await sendImage(phone, storyUrl, `Roteiro para ${destination} — ${name} ✈️`)
+    await sendImage(phone, storyUrl, `Roteiro para ${destination}, ${name} ✈️`)
 
     const referralCode = conv.referralCode || ''
     if (referralCode && config.whatsappNumber) {
@@ -296,7 +296,7 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
       if (referrerPhone) {
         await addFreeCredit(referrerPhone)
         const { sendWithTyping } = await import('../services/whatsapp.service')
-        sendWithTyping(referrerPhone, 'Alguém usou seu link de indicação e acabou de pagar! 🎉 Você ganhou 1 roteiro grátis — é só usar quando quiser.', 500)
+        sendWithTyping(referrerPhone, 'Alguém usou seu link de indicação e acabou de pagar! 🎉 Você ganhou 1 roteiro grátis. É só usar quando quiser.', 500)
           .catch(err => log.warn('notificação de referral falhou', { phone: referrerPhone, data: { msg: err.message } }))
         log.info('crédito grátis enviado ao referrer', { phone: referrerPhone })
       }

@@ -123,7 +123,7 @@ Escreva um comentário curto (2-3 linhas) sobre esta foto como se você fosse a 
 - Adapte o tom ao perfil: família = carinhoso e zueiro; casal = romântico e leve; aventureiro = adrenalina; solo = liberdade
 - Se a foto for bonita, pode ser poético mas termine com uma virada cômica ou inesperada
 - PROIBIDO: "Nesta foto", "Aqui vemos", clichês de guia turístico, frases genéricas
-- Máximo 1 emoji, só se muito natural. Sem asteriscos. Texto puro.`
+- Máximo 1 emoji, só se muito natural. Sem asteriscos e sem travessão (—). Texto puro.`
 
     const visionResponse = await openai.chat.completions.create({
       model: 'gpt-4o',
