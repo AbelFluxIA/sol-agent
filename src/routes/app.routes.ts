@@ -11,6 +11,10 @@ import { cancelGuiaReminder } from '../services/guia-reminder.service'
 import { getAlbum } from '../services/album.service'
 import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigo, telefoneDoPedido, pedidoExiste } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
+import {
+  consentimentos, registrarConsentimento, registrarPresenca, lerCadastro, salvarCadastro, roteirosDaSemana,
+  TIPOS_CONSENTIMENTO, type TipoConsentimento,
+} from '../services/presenca.service'
 import { log } from '../logger'
 
 const router = Router()
@@ -131,10 +135,13 @@ router.post('/api/app/auth/verificar-otp', async (req: Request, res: Response) =
 router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
   try {
-    const [conv, stats, itinerary] = await Promise.all([
+    const [conv, stats, itinerary, cota, cadastro, aceites] = await Promise.all([
       getOrCreateConversation(phone),
       getAccountStats(phone),
       getLatestItinerary(phone),
+      roteirosDaSemana(phone),
+      lerCadastro(phone),
+      consentimentos(phone),
     ])
 
     // Busca mural via Supabase REST
@@ -164,6 +171,10 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
         guiaPreco: config.demoFreeMode ? 'Grátis durante o teste' : `A partir de R$ ${config.regras.guiaPrecoDia.toFixed(2).replace('.', ',')} por dia`,
       },
       regras: config.regras,
+      // Roteiros gerados nesta semana (RA-ROT-01) e cadastro/aceites do app
+      cota: { ...cota, limite: conv.hasCompanion ? config.regras.guiaRoteirosSemana : config.regras.roteirosGratisSemana },
+      cadastro,
+      consentimentos: aceites,
       hasPaid: conv.hasPaid,
       hasCompanion: conv.hasCompanion,
       freeCredits: conv.freeCredits,
@@ -424,6 +435,65 @@ router.get('/api/app/sugestoes', clientAuthMiddleware, async (req: Request, res:
   } catch (err) {
     log.error('erro nas sugestões de destino', err, { phone, step: 'app-sugestoes' })
     res.status(503).json({ error: 'Sugestões indisponíveis agora' })
+  }
+})
+
+// ─── POST /api/app/cadastro ──────────────────────────────────────────────────
+// Etapas do cadastro (RA-CAD-04/05): nome confirmado, data de nascimento e fim
+router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const { nome, nascimento, concluir } = req.body ?? {}
+  if (nascimento !== undefined && (typeof nascimento !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(nascimento) || nascimento > new Date().toISOString().slice(0, 10) || nascimento < '1900-01-01')) {
+    res.status(400).json({ error: 'Data de nascimento inválida' }); return
+  }
+  try {
+    if (typeof nome === 'string' && nome.trim().length >= 2) await updateConversation(phone, { name: nome.trim().slice(0, 60) })
+    await salvarCadastro(phone, { nascimento, concluir: concluir === true })
+    res.json({ ok: true, cadastro: await lerCadastro(phone) })
+  } catch (err) {
+    log.error('erro ao salvar cadastro', err, { phone, step: 'app-cadastro' })
+    res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+// ─── POST /api/app/consentimento ─────────────────────────────────────────────
+// Aceite dos termos, do SOS e da localização durante a viagem (cada mudança é
+// uma linha nova; o mais recente vale)
+router.post('/api/app/consentimento', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const { tipo, versao, aceito } = req.body ?? {}
+  if (!TIPOS_CONSENTIMENTO.includes(tipo) || typeof versao !== 'string' || !versao.trim() || typeof aceito !== 'boolean') {
+    res.status(400).json({ error: 'Consentimento inválido' }); return
+  }
+  try {
+    await registrarConsentimento(phone, tipo as TipoConsentimento, versao.trim().slice(0, 40), aceito)
+    res.json({ ok: true, consentimentos: await consentimentos(phone) })
+  } catch (err) {
+    log.error('erro ao registrar consentimento', err, { phone, step: 'app-consentimento' })
+    res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+// ─── POST /api/app/presenca ──────────────────────────────────────────────────
+// Check-in de atividade (sempre) e posição durante a viagem (só com consentimento)
+router.post('/api/app/presenca', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const b = req.body ?? {}
+  if (!['checkin', 'posicao'].includes(b.tipo)) { res.status(400).json({ error: 'Tipo inválido' }); return }
+  const num = (v: unknown, min: number, max: number) => (typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : null)
+  const lat = num(b.lat, -90, 90)
+  const lng = num(b.lng, -180, 180)
+  if (b.tipo === 'posicao' && (lat === null || lng === null)) { res.status(400).json({ error: 'Posição inválida' }); return }
+  const texto = (v: unknown, n: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null)
+  try {
+    const r = await registrarPresenca(phone, {
+      tipo: b.tipo, itineraryId: texto(b.itineraryId, 60), lat, lng, precisao: num(b.precisao, 0, 100000),
+      atividade: texto(b.atividade, 160), localBusca: texto(b.localBusca, 200),
+    })
+    res.json({ resultado: r })
+  } catch (err) {
+    log.error('erro ao registrar presença', err, { phone, step: 'app-presenca' })
+    res.status(500).json({ error: 'Erro interno' })
   }
 })
 

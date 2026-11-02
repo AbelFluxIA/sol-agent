@@ -2,10 +2,11 @@ import { Router, Request, Response } from 'express'
 import { processMessage, generateAndSendItinerary, responderOfertaGuia, receberFoto } from '../agents/sol.agent'
 import { canalAtual } from '../services/canal.service'
 import { tratarMensagemDeLogin } from '../services/login.service'
+import { registrarPresenca } from '../services/presenca.service'
 import { trackOperation } from '../shutdown'
 import fs from 'fs'
 import path from 'path'
-import { getOrCreateConversation, updateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit, saveMessage } from '../services/database.service'
+import { getOrCreateConversation, updateConversation, updateItinerary, getLatestItinerary, resetConversation, getReferrerPhone, addFreeCredit, saveMessage, resolvePhone } from '../services/database.service'
 import { markAsRead, downloadMedia, sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { watermarkVideo } from '../services/watermark.service'
 import { transcribeAudio } from '../services/media.service'
@@ -202,6 +203,10 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
       const lng = messageObj.location?.longitude
       if (!lat || !lng) return
       log.info('localização recebida', { phone, data: { lat, lng } })
+      // Entra nos dados de presença só com o consentimento de localização ativo
+      resolvePhone(phone)
+        .then((p) => registrarPresenca(p, { tipo: 'guia', lat, lng, origem: 'whatsapp' }))
+        .catch((err) => log.warn('presença do WhatsApp não registrada', { phone, data: { error: (err as Error).message } }))
       text = `[LOCALIZAÇÃO: lat=${lat}, lng=${lng}]`
     } else if (type === 'interactive') {
       const buttonReply = messageObj.interactive?.button_reply

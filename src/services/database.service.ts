@@ -236,7 +236,7 @@ export async function listItineraries(phone: string, limit = 30) {
     take: limit,
     select: {
       id: true, days: true, status: true, pdfUrl: true,
-      destination: true, arrivalDate: true, departureDate: true, createdAt: true,
+      destination: true, arrivalDate: true, departureDate: true, createdAt: true, groupType: true,
     },
   })
 }
