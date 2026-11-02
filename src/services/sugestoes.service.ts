@@ -77,7 +77,7 @@ Sobre a pessoa:
 - Já fez roteiro para: ${visitados.length ? visitados.join(', ') : 'nenhum lugar ainda'}
 - Está em ou perto de: ${base}
 
-Sugira 6 destinos (cidades ou localidades turísticas) a até 300 km de ${base}, os que mais combinam com o perfil primeiro.
+Sugira 6 destinos (cidades ou localidades turísticas) a até 150 km de ${base}, os que mais combinam com o perfil primeiro. Pode ser qualquer lugar do mundo; dê preferência a cidades com estrutura turística organizada.
 Não repita lugares em que ela já fez roteiro. Pode incluir a própria cidade só se houver muito a fazer.
 Para cada um: tipo (um de: ${TIPOS.join(', ')}), um motivo curto falando com a pessoa ("você curte...", até 120 caracteres) e 3 atrações reais com o nome oficial.
 
