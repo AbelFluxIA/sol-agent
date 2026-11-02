@@ -35,6 +35,14 @@ export const config = {
     model: process.env.GOOGLE_MODEL || 'gemini-2.5-flash',
   },
 
+  // Fotos dos locais do roteiro (Google Places API New). Sem chave, fica desligado.
+  // Teto de fotos cobradas por dia (US$ 7 a cada 1.000 depois das 1.000 grátis do mês).
+  googlePlaces: {
+    apiKey: process.env.GOOGLE_PLACES_KEY || '',
+    fotosPorDia: Number(process.env.GOOGLE_PLACES_FOTOS_DIA ?? 150),
+    fotosPorPessoaDia: Number(process.env.GOOGLE_PLACES_FOTOS_PESSOA_DIA ?? 60),
+  },
+
   supabase: {
     url: required('SUPABASE_URL'),
     anonKey: required('SUPABASE_ANON_KEY'),

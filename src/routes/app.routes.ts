@@ -11,6 +11,7 @@ import { cancelGuiaReminder } from '../services/guia-reminder.service'
 import { getAlbum } from '../services/album.service'
 import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigo, telefoneDoPedido, pedidoExiste } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
+import { fotoDoLocal, fotosLigadas } from '../services/fotos-lugar.service'
 import {
   consentimentos, registrarConsentimento, registrarPresenca, lerCadastro, salvarCadastro, roteirosDaSemana,
   TIPOS_CONSENTIMENTO, type TipoConsentimento,
@@ -171,6 +172,7 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
         guiaPreco: config.demoFreeMode ? 'Grátis durante o teste' : `A partir de R$ ${config.regras.guiaPrecoDia.toFixed(2).replace('.', ',')} por dia`,
       },
       regras: config.regras,
+      recursos: { fotosLocais: fotosLigadas() },
       // Roteiros gerados nesta semana (RA-ROT-01) e cadastro/aceites do app
       cota: { ...cota, limite: conv.hasCompanion ? config.regras.guiaRoteirosSemana : config.regras.roteirosGratisSemana },
       cadastro,
@@ -435,6 +437,26 @@ router.get('/api/app/sugestoes', clientAuthMiddleware, async (req: Request, res:
   } catch (err) {
     log.error('erro nas sugestões de destino', err, { phone, step: 'app-sugestoes' })
     res.status(503).json({ error: 'Sugestões indisponíveis agora' })
+  }
+})
+
+// ─── GET /api/app/foto-local ─────────────────────────────────────────────────
+// Foto de um local do roteiro (Google Maps). 204 quando não há foto ou está desligado.
+router.get('/api/app/foto-local', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const local = typeof req.query.local === 'string' ? req.query.local.trim().slice(0, 120) : ''
+  const cidade = typeof req.query.cidade === 'string' ? req.query.cidade.trim().slice(0, 80) : ''
+  const lat = Number(req.query.lat)
+  const lng = Number(req.query.lng)
+  const perto = Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && (lat !== 0 || lng !== 0) ? { lat, lng } : null
+  if (local.length < 3 || !fotosLigadas()) { res.status(204).end(); return }
+  try {
+    const foto = await fotoDoLocal(phone, local, cidade, perto)
+    if (!foto) { res.status(204).end(); return }
+    res.set('Cache-Control', 'private, no-store').json(foto)
+  } catch (err) {
+    log.warn('foto do local falhou', { phone, step: 'foto-local', data: { error: (err as Error).message, status: (err as any)?.response?.status } })
+    res.status(204).end()
   }
 })
 
