@@ -6,6 +6,7 @@ interface GeneratePdfParams {
   travelerName: string
   destination: string
   itineraryText: string
+  phone?: string // fica na linha de generated_itineraries (limpeza e auditoria por telefone)
 }
 
 interface PdfResult {
@@ -14,7 +15,7 @@ interface PdfResult {
 }
 
 export async function generatePdf(params: GeneratePdfParams): Promise<PdfResult> {
-  const { travelerName, destination, itineraryText } = params
+  const { travelerName, destination, itineraryText, phone } = params
 
   const response = await axios.post(
     `${config.supabase.url}/functions/v1/generate-pdf`,
@@ -23,6 +24,7 @@ export async function generatePdf(params: GeneratePdfParams): Promise<PdfResult>
       destination,
       traveler_name: travelerName,
       text: itineraryText,
+      ...(phone ? { phone } : {}),
     },
     {
       headers: {

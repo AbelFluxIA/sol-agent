@@ -28,8 +28,18 @@ app.use(cors({
 }))
 
 // Middlewares
-app.use(express.json({ limit: '10mb' }))
-app.use(express.urlencoded({ extended: true }))
+app.disable('x-powered-by')
+app.set('trust proxy', 1) // atrás do Traefik: req.ip é o IP real (limites por IP)
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  next()
+})
+// JSON pequeno por padrão (foto, áudio e transcrição usam express.raw com limite próprio).
+// Guarda o corpo bruto para conferir a assinatura dos webhooks da Meta.
+app.use(express.json({ limit: '200kb', verify: (req, _res, buf) => { (req as any).rawBody = buf } }))
+app.use(express.urlencoded({ extended: true, limit: '50kb' }))
 
 // Rotas do app cliente (auth + perfil)
 app.use('/', appRoutes)
@@ -49,6 +59,10 @@ async function bootstrap() {
     // ninguém receber mensagem em dobro.
     if (process.env.DISABLE_DAILY_JOBS === 'true') log.info('envios agendados desligados (DISABLE_DAILY_JOBS)', { step: 'bootstrap' })
     else startDailyJobs()
+
+    if (!config.meta.appSecret) log.warn('META_APP_SECRET não definido: a assinatura do webhook do WhatsApp não é conferida', { step: 'bootstrap' })
+    if (!config.abacatePay.webhookSecret) log.warn('ABACATEPAY_WEBHOOK_SECRET vazio: webhooks de pagamento recusados', { step: 'bootstrap' })
+    if (!config.adminSecret) log.info('ZYNK_ADMIN_SECRET vazio: rotas internas desligadas', { step: 'bootstrap' })
 
     // HOST: escuta só nesse endereço (ex.: a rede interna do Docker, atrás do Traefik)
     const host = process.env.HOST || '::'

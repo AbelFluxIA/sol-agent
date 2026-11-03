@@ -32,7 +32,21 @@ interface GenerateItineraryParams {
   itineraryId?: string
 }
 
+// Datas no formato AAAA-MM-DD (como vêm do app): conta na mão, sem chamar a IA.
+// O modelo errava a conta (2 dias virava 1) e ainda custava uma chamada.
+function diasPorData(arrivalDate: string, departureDate: string): ValidDays | null {
+  const iso = /^\d{4}-\d{2}-\d{2}$/
+  if (!iso.test(arrivalDate) || !iso.test(departureDate)) return null
+  const n = Math.round((Date.parse(`${departureDate}T12:00:00Z`) - Date.parse(`${arrivalDate}T12:00:00Z`)) / 86400000) + 1
+  if (!Number.isFinite(n) || n < 1) return null
+  if (VALID_DAYS.includes(n as ValidDays)) return n as ValidDays
+  return VALID_DAYS.reduce((prev, curr) => Math.abs(curr - n) < Math.abs(prev - n) ? curr : prev)
+}
+
 export async function classifyDays(arrivalDate: string, departureDate: string, phone?: string): Promise<ValidDays> {
+  const certo = diasPorData(arrivalDate, departureDate)
+  if (certo) return certo
+
   const prompt = buildDaysClassifierPrompt(arrivalDate, departureDate)
 
   const response = await openai.chat.completions.create({

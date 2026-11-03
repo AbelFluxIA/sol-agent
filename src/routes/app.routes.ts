@@ -17,10 +17,14 @@ import {
   TIPOS_CONSENTIMENTO, type TipoConsentimento,
 } from '../services/presenca.service'
 import { log } from '../logger'
+import { excedeu, limitar, podeHoje } from '../middleware/limites'
 
 const router = Router()
 
-const JWT_SECRET = process.env.JWT_SECRET || 'sol-app-secret-change-me'
+// Teto geral por IP (atrás do Traefik): 300 pedidos por minuto
+router.use('/api/app', limitar('api-ip', 300, 60_000))
+
+const JWT_SECRET = config.jwtSecret
 
 // Normaliza telefone brasileiro: aceita (11) 99999-9999, +5511..., 11999... → 5511999999999
 function normalizePhone(raw: string): string {
@@ -79,14 +83,16 @@ router.post('/api/app/auth/pedido', (_req: Request, res: Response) => {
 // ─── POST /api/app/auth/solicitar-otp ───────────────────────────────────────
 // Envia o código pelo número digitado. Só chega se a pessoa falou com a Sol
 // nas últimas 24 h (regra do WhatsApp); o caminho principal é o pedido acima.
-router.post('/api/app/auth/solicitar-otp', async (req: Request, res: Response) => {
+router.post('/api/app/auth/solicitar-otp', limitar('otp-ip', 10, 3600_000), async (req: Request, res: Response) => {
   const { phone: rawPhone } = req.body
-  if (!rawPhone) { res.status(400).json({ error: 'Telefone obrigatório' }); return }
+  if (typeof rawPhone !== 'string' || !rawPhone) { res.status(400).json({ error: 'Telefone obrigatório' }); return }
 
   const typed = normalizePhone(rawPhone)
   if (typed.length < 12) { res.status(400).json({ error: 'Telefone inválido' }); return }
   // Usa o número da conversa que já existe no WhatsApp (com ou sem o 9)
   const phone = await resolvePhone(typed)
+  // No máximo 3 códigos por hora para o mesmo número (ninguém é bombardeado)
+  if (excedeu('otp-fone', phone, 3, 3600_000)) { res.status(429).json({ error: 'Já mandei o código. Espere um pouco antes de pedir outro.' }); return }
   const code = gerarCodigo(phone)
 
   try {
@@ -106,7 +112,7 @@ router.post('/api/app/auth/solicitar-otp', async (req: Request, res: Response) =
 
 // ─── POST /api/app/auth/verificar-otp ───────────────────────────────────────
 // Confere o código ({ pedido, code } ou { phone, code }) e devolve o JWT
-router.post('/api/app/auth/verificar-otp', async (req: Request, res: Response) => {
+router.post('/api/app/auth/verificar-otp', limitar('otp-verificar', 30, 600_000), async (req: Request, res: Response) => {
   const { phone: rawPhone, pedido, code } = req.body ?? {}
   if (!code || (!rawPhone && !pedido)) { res.status(400).json({ error: 'Código obrigatório' }); return }
 
@@ -244,6 +250,8 @@ router.post('/api/app/chat', clientAuthMiddleware, async (req: Request, res: Res
     res.status(400).json({ error: 'Mensagem obrigatória' })
     return
   }
+  if (message.length > 2000) { res.status(400).json({ error: 'Mensagem longa demais (máximo 2.000 caracteres)' }); return }
+  if (excedeu('chat', phone, 20, 60_000)) { res.status(429).json({ error: 'Calma, uma mensagem de cada vez. Espere um minuto.' }); return }
   try {
     cancelGuiaReminder(phone)
     const reply = await processMessage(phone, message.trim(), 'app')
@@ -360,6 +368,15 @@ router.post('/api/app/roteiros/criar', clientAuthMiddleware, async (req: Request
   const maxDias = conv.hasCompanion ? config.regras.maxDiasComGuia : config.regras.maxDiasSemGuia
   const dias = Math.round((Date.parse(`${b.saida}T12:00:00Z`) - Date.parse(`${b.chegada}T12:00:00Z`)) / 86400000) + 1
   if (dias > maxDias) { res.status(400).json({ error: `O roteiro pode ter até ${maxDias} dias` }); return }
+  // Cota semanal (RA-ROT): grátis N por semana; com a Guia (ou no modo demonstração) o teto da Guia
+  const cota = await roteirosDaSemana(phone)
+  const limiteSemana = conv.hasCompanion || config.demoFreeMode ? config.regras.guiaRoteirosSemana : config.regras.roteirosGratisSemana
+  if (cota.usados >= limiteSemana) {
+    const renova = new Date(cota.renovaEm).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', timeZone: 'America/Sao_Paulo' })
+    res.status(429).json({ error: `Você já usou os ${limiteSemana} roteiros desta semana. Renova em ${renova}.` })
+    return
+  }
+  if (excedeu('criar-roteiro', phone, 3, 600_000)) { res.status(429).json({ error: 'Espere alguns minutos antes de pedir outro roteiro.' }); return }
   const pedido: PedidoRoteiroApp = {
     destino: b.destino.trim().slice(0, 80),
     chegada: b.chegada,
@@ -393,6 +410,7 @@ router.post('/api/app/traduzir', clientAuthMiddleware, async (req: Request, res:
   const { texto, para, de } = req.body ?? {}
   if (typeof texto !== 'string' || !texto.trim() || texto.length > 2000) { res.status(400).json({ error: 'Texto vazio ou longo demais' }); return }
   if (typeof para !== 'string' || !IDIOMAS[para]) { res.status(400).json({ error: 'Idioma não suportado' }); return }
+  if (!podeHoje('traduzir', phone, config.regras.tradutorMensagensDia)) { res.status(429).json({ error: `Limite de ${config.regras.tradutorMensagensDia} traduções por dia. Amanhã libera de novo.` }); return }
   try {
     res.json(await traduzir(texto.trim(), para, typeof de === 'string' ? de : undefined))
   } catch (err) {
@@ -412,6 +430,7 @@ router.post(
     const audio = req.body
     if (!Buffer.isBuffer(audio) || audio.length < 500) { res.status(400).json({ error: 'Áudio vazio' }); return }
     const mimeType = String(req.headers['content-type'] || 'audio/webm').split(';')[0]
+    if (!podeHoje('transcrever', phone, 80)) { res.status(429).json({ error: 'Limite de áudios por hoje. Escreva o texto, por favor.' }); return }
     try {
       res.json({ texto: (await transcribeAudio(audio, mimeType)).trim() })
     } catch (err) {
@@ -428,6 +447,8 @@ router.get('/api/app/sugestoes', clientAuthMiddleware, async (req: Request, res:
   const phone = (req as any).clientPhone as string
   const lat = Number(req.query.lat)
   const lng = Number(req.query.lng)
+  // Cada cidade nova custa uma chamada à IA com busca: teto por pessoa e por dia
+  if (!podeHoje('sugestoes', phone, 30)) { res.status(429).json({ error: 'Sugestões indisponíveis agora' }); return }
   try {
     let base: string | null = null
     if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) base = await cidadeDaPosicao(lat, lng)
@@ -469,7 +490,20 @@ router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res:
     res.status(400).json({ error: 'Data de nascimento inválida' }); return
   }
   try {
-    if (typeof nome === 'string' && nome.trim().length >= 2) await updateConversation(phone, { name: nome.trim().slice(0, 60) })
+    if (typeof nome === 'string' && nome.trim().length >= 2) { await getOrCreateConversation(phone); await updateConversation(phone, { name: nome.trim().slice(0, 60) }) }
+    // Menor de 18 não conclui o cadastro (conta restrita, RA-MEN-01): fica só com SOS e telefones úteis
+    if (concluir === true) {
+      const nasc = typeof nascimento === 'string' ? nascimento : (await lerCadastro(phone)).nascimento
+      if (nasc) {
+        const n = new Date(`${nasc}T12:00:00Z`); const hoje = new Date()
+        let idade = hoje.getUTCFullYear() - n.getUTCFullYear()
+        if (hoje.getUTCMonth() < n.getUTCMonth() || (hoje.getUTCMonth() === n.getUTCMonth() && hoje.getUTCDate() < n.getUTCDate())) idade--
+        if (idade < 18) {
+          await salvarCadastro(phone, { nascimento, concluir: false })
+          res.status(403).json({ error: 'Conta restrita: o cadastro de menor de 18 anos precisa do responsável', cadastro: await lerCadastro(phone) }); return
+        }
+      }
+    }
     await salvarCadastro(phone, { nascimento, concluir: concluir === true })
     res.json({ ok: true, cadastro: await lerCadastro(phone) })
   } catch (err) {

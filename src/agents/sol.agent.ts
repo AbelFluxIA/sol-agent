@@ -95,7 +95,7 @@ export async function responderOfertaGuia(
   aceitou: boolean,
   channel: Canal,
   textoDoBotao: string | null,
-): Promise<{ resultado: 'ja_ativa' | 'ativada' | 'pagamento' | 'recusou'; textos: string[] }> {
+): Promise<{ resultado: 'ja_ativa' | 'ativada' | 'pagamento' | 'recusou' | 'sem_link'; textos: string[] }> {
   marcarCanal(phone, channel)
   cancelGuiaReminder(phone)
   const conv = await getOrCreateConversation(phone)
@@ -119,8 +119,14 @@ export async function responderOfertaGuia(
     return { resultado: 'ja_ativa', textos: [await responder(phone, channel, msg, 600)] }
   }
 
-  // DEMO_FREE_MODE (temporário): ativa direto, sem link de pagamento
-  if (config.demoFreeMode || !config.companionPaymentLink) {
+  // DEMO_FREE_MODE (temporário): ativa direto, sem link de pagamento.
+  // Fora do modo teste, conversa nunca ativa a Guia (RA-GER-04): sem link configurado, avisa.
+  if (!config.demoFreeMode && !config.companionPaymentLink) {
+    log.error('COMPANION_PAYMENT_LINK não configurado', new Error('missing payment link'), { phone })
+    const msg = 'A ativação da Guia Sol está indisponível agora. Tente de novo mais tarde.'
+    return { resultado: 'sem_link', textos: [await responder(phone, channel, msg, 600)] }
+  }
+  if (config.demoFreeMode) {
     await updateConversation(phone, { hasCompanion: true })
     const activationMsg = buildGuiaActivatedMessage(name)
     await saveMessage(phone, 'assistant', activationMsg)
@@ -827,7 +833,7 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
 
     // Salva texto no banco para a Sol Guia usar como contexto
     if (latestIt) {
-      await updateItinerary(latestIt.id, { rawItinerary: itineraryText })
+      await updateItinerary(latestIt.id, { rawItinerary: itineraryText, status: 'generated' })
     }
 
     // Gera o PDF com o roteiro completo
@@ -836,11 +842,12 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
         travelerName: name,
         destination: dest,
         itineraryText,
+        phone,
       })
     )
 
     if (latestIt && pdfUrl) {
-      await updateItinerary(latestIt.id, { pdfUrl })
+      await updateItinerary(latestIt.id, { pdfUrl, status: 'sent' })
     }
 
     // Link do roteiro interativo (abre dentro do app quando a pessoa já entrou nele)

@@ -26,8 +26,15 @@ export const config = {
   meta: {
     accessToken: required('META_ACCESS_TOKEN'),       // Token permanente gerado no Meta for Developers
     phoneNumberId: required('META_PHONE_NUMBER_ID'),  // ID do número no painel Meta
-    verifyToken: process.env.META_VERIFY_TOKEN || 'sol_verify_token', // token que você inventa para verificar webhook
+    verifyToken: required('META_VERIFY_TOKEN'),       // token que você inventa para verificar webhook
+    appSecret: process.env.META_APP_SECRET || '',     // App Secret do app Meta: confere a assinatura dos webhooks
   },
+
+  // Sessão do app (JWT). Sem valor fixo de reserva: faltando, o servidor não sobe.
+  jwtSecret: required('JWT_SECRET'),
+
+  // Segredo das rotas internas (/internal/*, /test/*). Vazio = rotas desligadas.
+  adminSecret: process.env.ZYNK_ADMIN_SECRET || '',
 
   // Google Gemini (para gerar roteiros — usa API do Google AI Studio)
   google: {

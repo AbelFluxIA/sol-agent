@@ -14,6 +14,9 @@ import { generateStoryImage, uploadStoryImage } from '../services/story.service'
 import { buildGuiaActivatedMessage, buildReferralMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
 import { config } from '../config'
+import { adminAuth, assinaturaMetaConfere, segredoPagamentoConfere } from '../middleware/limites'
+
+const escaparHtml = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
 
 const router = Router()
 
@@ -119,6 +122,12 @@ router.get('/webhook/whatsapp', (req: Request, res: Response) => {
 // ----------------------------------------------------------------
 router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
   try {
+    // Só a Meta assina com o App Secret: sem assinatura válida, nada é processado
+    if (!assinaturaMetaConfere(req)) {
+      log.warn('webhook whatsapp com assinatura inválida', { step: 'webhook' })
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
     const body = req.body
     res.status(200).json({ ok: true })
 
@@ -265,8 +274,13 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
 // ----------------------------------------------------------------
 router.post('/webhook/payment', async (req: Request, res: Response) => {
   try {
+    if (!segredoPagamentoConfere(req)) {
+      log.warn('webhook pagamento sem segredo válido', { step: 'webhook-payment' })
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
     const body = req.body
-    log.info('webhook pagamento recebido', { data: body })
+    log.info('webhook pagamento recebido', { data: { id: body?.payment?.id || body?.id, status: body?.payment?.status || body?.status } })
     res.status(200).json({ ok: true })
 
     const status = body?.payment?.status || body?.status
@@ -283,7 +297,7 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
     const paymentId = body?.payment?.id || body?.id
 
     if (!phone) {
-      log.error('telefone não encontrado no webhook de pagamento', new Error('missing phone'), { data: body })
+      log.error('telefone não encontrado no webhook de pagamento', new Error('missing phone'), { data: { paymentId } })
       return
     }
 
@@ -321,8 +335,13 @@ router.post('/webhook/payment', async (req: Request, res: Response) => {
 // ----------------------------------------------------------------
 router.post('/webhook/payment-guia', async (req: Request, res: Response) => {
   try {
+    if (!segredoPagamentoConfere(req)) {
+      log.warn('webhook pagamento guia sem segredo válido', { step: 'webhook-payment-guia' })
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
     const body = req.body
-    log.info('webhook pagamento guia recebido', { data: body })
+    log.info('webhook pagamento guia recebido', { data: { id: body?.payment?.id || body?.id, status: body?.payment?.status || body?.status } })
     res.status(200).json({ ok: true })
 
     const status = body?.payment?.status || body?.status
@@ -337,7 +356,7 @@ router.post('/webhook/payment-guia', async (req: Request, res: Response) => {
       body?.customer?.phone
 
     if (!phone) {
-      log.error('telefone não encontrado no webhook guia', new Error('missing phone'), { data: body })
+      log.error('telefone não encontrado no webhook guia', new Error('missing phone'))
       return
     }
 
@@ -360,7 +379,7 @@ router.post('/webhook/payment-guia', async (req: Request, res: Response) => {
 // ----------------------------------------------------------------
 // POST /internal/reset-session — chamado pelo Zynk ao reiniciar conversa
 // ----------------------------------------------------------------
-router.post('/internal/reset-session', async (req: Request, res: Response) => {
+router.post('/internal/reset-session', adminAuth, async (req: Request, res: Response) => {
   const { phone } = req.body
   if (!phone) return res.status(400).json({ error: 'phone obrigatório' })
 
@@ -378,7 +397,7 @@ router.post('/internal/reset-session', async (req: Request, res: Response) => {
     res.json({ success: true })
   } catch (err: any) {
     log.error('erro ao resetar sessão', err, { phone: req.body?.phone })
-    res.status(500).json({ error: err.message })
+    res.status(500).json({ error: 'Erro ao reiniciar sessão' })
   }
 })
 
@@ -392,10 +411,10 @@ router.get('/health', (_req: Request, res: Response) => {
 // ----------------------------------------------------------------
 // GET /internal/logs — visualizador de logs JSON estruturado
 // ----------------------------------------------------------------
-router.get('/internal/logs', (req: Request, res: Response) => {
+router.get('/internal/logs', adminAuth, (req: Request, res: Response) => {
   const lines   = Math.min(Number(req.query.lines) || 200, 2000)
-  const phone   = (req.query.phone as string) || ''
-  const level   = (req.query.level as string) || ''
+  const phone   = escaparHtml(String(req.query.phone || '')).slice(0, 20)
+  const level   = ['error', 'warn', 'info'].includes(String(req.query.level)) ? String(req.query.level) : ''
   const outFile = '/root/.pm2/logs/sol-agent-out.log'
   const errFile = '/root/.pm2/logs/sol-agent-error.log'
 
@@ -456,7 +475,7 @@ a{color:#88c;text-decoration:none}.hdr{display:flex;gap:8px;margin-bottom:12px;a
 // ----------------------------------------------------------------
 // POST /test/message (remover em produção)
 // ----------------------------------------------------------------
-router.post('/test/message', async (req: Request, res: Response) => {
+router.post('/test/message', adminAuth, async (req: Request, res: Response) => {
   const { phone, message } = req.body
   if (!phone || !message) {
     return res.status(400).json({ error: 'phone e message são obrigatórios' })
@@ -465,14 +484,15 @@ router.post('/test/message', async (req: Request, res: Response) => {
     await processMessage(phone, message)
     res.json({ ok: true, message: 'Mensagem processada' })
   } catch (error: any) {
-    res.status(500).json({ error: error.message })
+    log.error('erro na mensagem de teste', error, { phone })
+    res.status(500).json({ error: 'Erro ao processar' })
   }
 })
 
 // ----------------------------------------------------------------
 // POST /internal/generate-itinerary — dispara geração sem verificar crédito
 // ----------------------------------------------------------------
-router.post('/internal/generate-itinerary', async (req: Request, res: Response) => {
+router.post('/internal/generate-itinerary', adminAuth, async (req: Request, res: Response) => {
   const { phone } = req.body
   if (!phone) return res.status(400).json({ error: 'phone obrigatório' })
   res.json({ ok: true, message: 'Geração iniciada' })
