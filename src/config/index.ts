@@ -36,6 +36,13 @@ export const config = {
   // Segredo das rotas internas (/internal/*, /test/*). Vazio = rotas desligadas.
   adminSecret: process.env.ZYNK_ADMIN_SECRET || '',
 
+  // Conta do revisor das lojas (Apple/Google): número e código fixos, sem WhatsApp.
+  // Só existe quando as duas variáveis estão definidas.
+  revisor: {
+    phone: (process.env.REVISOR_PHONE || '').replace(/\D/g, ''),
+    code: process.env.REVISOR_CODE || '',
+  },
+
   // Google Gemini (para gerar roteiros — usa API do Google AI Studio)
   google: {
     apiKey: required('GOOGLE_API_KEY'),

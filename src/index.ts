@@ -18,6 +18,9 @@ app.use(cors({
     'https://painel.tripsol.com.br',
     'https://iaturismo.vercel.app',
     'https://iaturismo-two.vercel.app',
+    // App nativo (Capacitor): origem do WebView no Android e no iPhone
+    'https://localhost',
+    'capacitor://localhost',
     'http://localhost:8080',
     'http://localhost:5173',
     // Outros endereços do app (ex.: domínio próprio), separados por vírgula

@@ -2,7 +2,8 @@ import axios from 'axios'
 import { createCanvas, loadImage, registerFont } from 'canvas'
 import { log } from '../logger'
 
-const PEXELS_API_KEY = 'IFGmSjU0QBncKhIcvtjRYAjSigjPHdxhEOCGUwDe40fk7AmhC1QtpHi7'
+// Chave da Pexels só pelo .env (a antiga, escrita no código, vazou no repositório público: trocar)
+const PEXELS_API_KEY = process.env.PEXELS_API_KEY || ''
 const SUPABASE_URL = process.env.SUPABASE_URL!
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!
 

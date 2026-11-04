@@ -17,7 +17,8 @@ import {
   TIPOS_CONSENTIMENTO, type TipoConsentimento,
 } from '../services/presenca.service'
 import { log } from '../logger'
-import { excedeu, limitar, podeHoje } from '../middleware/limites'
+import { excedeu, limitar, podeHoje, segredoConfere } from '../middleware/limites'
+import { excluirConta } from '../services/conta.service'
 
 const router = Router()
 
@@ -89,6 +90,8 @@ router.post('/api/app/auth/solicitar-otp', limitar('otp-ip', 10, 3600_000), asyn
 
   const typed = normalizePhone(rawPhone)
   if (typed.length < 12) { res.status(400).json({ error: 'Telefone inválido' }); return }
+  // Revisor das lojas: não manda WhatsApp, o código é fixo
+  if (config.revisor.phone && config.revisor.code && typed === config.revisor.phone) { res.json({ ok: true, hasName: true }); return }
   // Usa o número da conversa que já existe no WhatsApp (com ou sem o 9)
   const phone = await resolvePhone(typed)
   // No máximo 3 códigos por hora para o mesmo número (ninguém é bombardeado)
@@ -125,7 +128,8 @@ router.post('/api/app/auth/verificar-otp', limitar('otp-verificar', 30, 600_000)
     phone = await resolvePhone(normalizePhone(String(rawPhone)))
   }
 
-  if (!conferirCodigo(phone, String(code))) {
+  const revisor = !!config.revisor.phone && !!config.revisor.code && phone === config.revisor.phone
+  if (revisor ? !segredoConfere(String(code), config.revisor.code) : !conferirCodigo(phone, String(code))) {
     res.status(401).json({ error: 'Código incorreto ou vencido. Confira o código que a Sol mandou.' })
     return
   }
@@ -509,6 +513,22 @@ router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res:
   } catch (err) {
     log.error('erro ao salvar cadastro', err, { phone, step: 'app-cadastro' })
     res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+// ─── POST /api/app/conta/excluir ─────────────────────────────────────────────
+// Exclusão da conta pela própria pessoa (LGPD; exigência da App Store e do Play).
+// Apaga conversa, roteiros, fotos, PDFs, cadastro, consentimentos e presença.
+// (POST, e não DELETE: a reescrita da Vercel e o Traefik tratam POST sem surpresas.)
+router.post('/api/app/conta/excluir', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  if (req.body?.confirmo !== true) { res.status(400).json({ error: 'Confirmação obrigatória' }); return }
+  if (excedeu('excluir-conta', phone, 2, 3600_000)) { res.status(429).json({ error: 'Espere um pouco e tente de novo.' }); return }
+  try {
+    res.json({ ok: true, resumo: await excluirConta(phone) })
+  } catch (err) {
+    log.error('erro ao excluir conta', err, { phone, step: 'excluir-conta' })
+    res.status(500).json({ error: 'Não consegui excluir agora. Tente de novo em instantes.' })
   }
 })
 
