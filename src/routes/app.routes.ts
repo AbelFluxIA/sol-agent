@@ -489,11 +489,30 @@ router.get('/api/app/foto-local', clientAuthMiddleware, async (req: Request, res
 // Etapas do cadastro (RA-CAD-04/05): nome confirmado, data de nascimento e fim
 router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
-  const { nome, nascimento, concluir } = req.body ?? {}
+  const { nome, nascimento, concluir, gostos, viagem, lugaresDesejados } = req.body ?? {}
   if (nascimento !== undefined && (typeof nascimento !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(nascimento) || nascimento > new Date().toISOString().slice(0, 10) || nascimento < '1900-01-01')) {
     res.status(400).json({ error: 'Data de nascimento inválida' }); return
   }
+  // Onboarding: gostos (tipos de passeio), viagem em mente e lugares que quer conhecer
+  const textos = (v: unknown, max: number, tam: number) =>
+    Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string' && t.trim().length > 0).map(t => t.trim().slice(0, tam)).slice(0, max) : undefined
+  const data = /^\d{4}-\d{2}-\d{2}$/
+  let viagemLimpa: { destino: string; chegada?: string; saida?: string } | null | undefined
+  if (viagem === null) viagemLimpa = null
+  else if (viagem && typeof viagem === 'object' && typeof viagem.destino === 'string' && viagem.destino.trim()) {
+    viagemLimpa = {
+      destino: viagem.destino.trim().slice(0, 80),
+      chegada: data.test(viagem.chegada) ? viagem.chegada : undefined,
+      saida: data.test(viagem.saida) ? viagem.saida : undefined,
+    }
+  }
+  const gostosLimpos = textos(gostos, 6, 40)
   try {
+    // Os gostos viram o perfil do turista usado pela Sol nos roteiros (se ainda não houver um)
+    if (gostosLimpos?.length) {
+      const conv = await getOrCreateConversation(phone)
+      if (!conv.touristProfile) await updateConversation(phone, { touristProfile: `foco em ${gostosLimpos.join(', ')}` })
+    }
     if (typeof nome === 'string' && nome.trim().length >= 2) { await getOrCreateConversation(phone); await updateConversation(phone, { name: nome.trim().slice(0, 60) }) }
     // Menor de 18 não conclui o cadastro (conta restrita, RA-MEN-01): fica só com SOS e telefones úteis
     if (concluir === true) {
@@ -508,7 +527,7 @@ router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res:
         }
       }
     }
-    await salvarCadastro(phone, { nascimento, concluir: concluir === true })
+    await salvarCadastro(phone, { nascimento, concluir: concluir === true, gostos: gostosLimpos, viagem: viagemLimpa, lugaresDesejados: textos(lugaresDesejados, 15, 60) })
     res.json({ ok: true, cadastro: await lerCadastro(phone) })
   } catch (err) {
     log.error('erro ao salvar cadastro', err, { phone, step: 'app-cadastro' })

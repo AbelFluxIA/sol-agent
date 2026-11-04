@@ -57,22 +57,50 @@ export async function registrarPresenca(phone: string, p: {
   return 'ok'
 }
 
-export async function lerCadastro(phone: string): Promise<{ nascimento: string | null; concluidoEm: string | null }> {
-  const r = await prisma.$queryRaw<{ nascimento: Date | null; cadastro_concluido_em: Date | null }[]>`
-    select nascimento, cadastro_concluido_em from public.sol_cadastro where phone = ${phone}`
+export interface Cadastro {
+  nascimento: string | null
+  concluidoEm: string | null
+  gostos: string[]                       // tipos de passeio que a pessoa mais gosta (onboarding)
+  viagem: { destino: string; chegada: string | null; saida: string | null } | null // viagem em mente
+  lugaresDesejados: string[]             // lugares que tem vontade de conhecer
+}
+
+const dia = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null)
+
+export async function lerCadastro(phone: string): Promise<Cadastro> {
+  const r = await prisma.$queryRaw<{
+    nascimento: Date | null; cadastro_concluido_em: Date | null; gostos: string[] | null
+    viagem_destino: string | null; viagem_chegada: Date | null; viagem_saida: Date | null; lugares_desejados: string[] | null
+  }[]>`
+    select nascimento, cadastro_concluido_em, gostos, viagem_destino, viagem_chegada, viagem_saida, lugares_desejados
+    from public.sol_cadastro where phone = ${phone}`
+  const c = r[0]
   return {
-    nascimento: r[0]?.nascimento ? r[0].nascimento.toISOString().slice(0, 10) : null,
-    concluidoEm: r[0]?.cadastro_concluido_em?.toISOString() ?? null,
+    nascimento: dia(c?.nascimento),
+    concluidoEm: c?.cadastro_concluido_em?.toISOString() ?? null,
+    gostos: c?.gostos ?? [],
+    viagem: c?.viagem_destino ? { destino: c.viagem_destino, chegada: dia(c.viagem_chegada), saida: dia(c.viagem_saida) } : null,
+    lugaresDesejados: c?.lugares_desejados ?? [],
   }
 }
 
-export async function salvarCadastro(phone: string, dados: { nascimento?: string; concluir?: boolean }) {
+export async function salvarCadastro(phone: string, dados: {
+  nascimento?: string; concluir?: boolean; gostos?: string[]
+  viagem?: { destino: string; chegada?: string; saida?: string } | null; lugaresDesejados?: string[]
+}) {
   await prisma.$executeRaw`
-    insert into public.sol_cadastro (phone, nascimento, cadastro_concluido_em, atualizado_em)
-    values (${phone}, ${dados.nascimento ?? null}::date, ${dados.concluir ? new Date() : null}, now())
+    insert into public.sol_cadastro (phone, nascimento, cadastro_concluido_em, gostos, viagem_destino, viagem_chegada, viagem_saida, lugares_desejados, atualizado_em)
+    values (${phone}, ${dados.nascimento ?? null}::date, ${dados.concluir ? new Date() : null},
+            ${dados.gostos ?? null}::text[], ${dados.viagem?.destino ?? null}, ${dados.viagem?.chegada ?? null}::date, ${dados.viagem?.saida ?? null}::date,
+            ${dados.lugaresDesejados ?? null}::text[], now())
     on conflict (phone) do update set
       nascimento = coalesce(excluded.nascimento, sol_cadastro.nascimento),
       cadastro_concluido_em = coalesce(sol_cadastro.cadastro_concluido_em, excluded.cadastro_concluido_em),
+      gostos = coalesce(excluded.gostos, sol_cadastro.gostos),
+      viagem_destino = case when ${dados.viagem === null} then null else coalesce(excluded.viagem_destino, sol_cadastro.viagem_destino) end,
+      viagem_chegada = case when ${dados.viagem === null} then null else coalesce(excluded.viagem_chegada, sol_cadastro.viagem_chegada) end,
+      viagem_saida = case when ${dados.viagem === null} then null else coalesce(excluded.viagem_saida, sol_cadastro.viagem_saida) end,
+      lugares_desejados = coalesce(excluded.lugares_desejados, sol_cadastro.lugares_desejados),
       atualizado_em = now()`
 }
 
