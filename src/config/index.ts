@@ -36,6 +36,9 @@ export const config = {
   // Segredo das rotas internas (/internal/*, /test/*). Vazio = rotas desligadas.
   adminSecret: process.env.ZYNK_ADMIN_SECRET || '',
 
+  // Telefones (só dígitos) que veem a tela de administração do app e liberam recursos para testes
+  adminPhones: (process.env.ADMIN_PHONES || '').split(',').map(v => v.replace(/\D/g, '')).filter(Boolean),
+
   // Conta do revisor das lojas (Apple/Google): número e código fixos, sem WhatsApp.
   // Só existe quando as duas variáveis estão definidas.
   revisor: {
@@ -73,7 +76,7 @@ export const config = {
   regras: {
     roteirosGratisSemana: Number(process.env.FREE_ROTEIROS_PER_WEEK ?? 2),
     diaRoteiroPreco: Number(process.env.ROTEIRO_DAY_PRICE_BRL ?? 4.9),
-    maxDiasSemGuia: Number(process.env.ROTEIRO_MAX_DAYS ?? 5),
+    maxDiasSemGuia: Number(process.env.ROTEIRO_MAX_DAYS ?? 1), // RA-ROT-01: roteiro grátis cobre 1 dia (dias pagos: RA-ROT-02, ainda sem pagamento)
     guiaRoteirosSemana: Number(process.env.GUIA_ROTEIROS_PER_WEEK ?? 30),
     maxDiasComGuia: Number(process.env.GUIA_ROTEIRO_MAX_DAYS ?? 7),
     guiaPrecoDia: Number(process.env.SOL_GUIA_PRICE_PER_DAY_BRL ?? 9.9),

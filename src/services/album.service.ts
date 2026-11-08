@@ -4,7 +4,7 @@
 // do grupo vem do mural ou do roteiro daquelas datas (senão, o mês).
 
 import { config } from '../config'
-import prisma, { phoneVariants } from './database.service'
+import prisma, { phoneVariants, getOrCreateConversation } from './database.service'
 
 interface FotoAlbum {
   url: string
@@ -123,4 +123,56 @@ export async function getAlbum(phone: string): Promise<{
     total: fotos.size,
     mural: principal ? { shareCode: principal.share_code, fotos: contagem.get(principal.id) ?? 0 } : null,
   }
+}
+
+// ─── Regra do mural/álbum ─────────────────────────────────────────────────────
+// Enviar fotos é recurso da Guia Sol e só durante a viagem (chegada ≤ hoje ≤ volta).
+// Depois que a viagem acaba, a pessoa só vê, apaga e compartilha.
+export type MotivoBloqueio = 'sem_guia' | 'sem_viagem' | 'viagem_encerrada'
+export interface EstadoAlbum {
+  podeEnviar: boolean
+  motivo: MotivoBloqueio | null
+  viagem: { destino: string | null; chegada: string; saida: string } | null
+}
+
+const hojeBrasil = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+
+export async function estadoDoAlbum(phone: string): Promise<EstadoAlbum> {
+  const conv = await getOrCreateConversation(phone)
+  const it = await prisma.itinerary.findFirst({
+    where: { conversationId: conv.id, arrivalDate: { not: null } },
+    orderBy: { createdAt: 'desc' },
+    select: { destination: true, arrivalDate: true, departureDate: true },
+  })
+  const viagem = it?.arrivalDate ? { destino: it.destination, chegada: it.arrivalDate, saida: it.departureDate ?? it.arrivalDate } : null
+  if (!conv.hasCompanion) return { podeEnviar: false, motivo: 'sem_guia', viagem }
+  const hoje = hojeBrasil()
+  if (!viagem || hoje < viagem.chegada) return { podeEnviar: false, motivo: 'sem_viagem', viagem }
+  if (hoje > viagem.saida) return { podeEnviar: false, motivo: 'viagem_encerrada', viagem }
+  return { podeEnviar: true, motivo: null, viagem }
+}
+
+export const MENSAGEM_BLOQUEIO: Record<MotivoBloqueio, string> = {
+  sem_guia: 'As fotos do álbum são um recurso da Guia Sol. Ative a Guia na sua viagem para guardar fotos aqui.',
+  sem_viagem: 'O álbum recebe fotos durante a viagem. Quando ela começar, é só mandar.',
+  viagem_encerrada: 'Essa viagem já terminou: você pode ver, apagar e compartilhar as fotos, mas não enviar novas.',
+}
+
+// Apaga uma foto da pessoa: arquivo no bucket, linha em customer_photos e no mural
+export async function apagarFotoDoAlbum(phone: string, url: string): Promise<boolean> {
+  const phones = phoneVariants(phone)
+  const key = config.supabase.serviceKey
+  const h = { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }
+  const minhas = await supabaseGet(`customer_photos?phone=in.${lista(phones)}&photo_url=eq.${encodeURIComponent(url)}&select=id`)
+  const murais = await supabaseGet(`photo_murals?phone=in.${lista(phones)}&select=id`)
+  const noMural = murais.length
+    ? await supabaseGet(`mural_photos?mural_id=in.${lista(murais.map(m => m.id))}&photo_url=eq.${encodeURIComponent(url)}&select=id`)
+    : []
+  if (!minhas.length && !noMural.length) return false // não é dela
+  for (const [tabela, linhas] of [['customer_photos', minhas], ['mural_photos', noMural]] as const) {
+    if (linhas.length) await fetch(`${config.supabase.url}/rest/v1/${tabela}?id=in.${lista(linhas.map((l: any) => l.id))}`, { method: 'DELETE', headers: h })
+  }
+  const m = url.match(/\/storage\/v1\/object\/(?:public\/)?([^/]+)\/(.+)$/)
+  if (m) await fetch(`${config.supabase.url}/storage/v1/object/${m[1]}`, { method: 'DELETE', headers: h, body: JSON.stringify({ prefixes: [decodeURIComponent(m[2].split('?')[0])] }) }).catch(() => { /* arquivo já não existia */ })
+  return true
 }

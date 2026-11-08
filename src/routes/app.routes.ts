@@ -1,6 +1,6 @@
 import express, { Router, Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
-import { getOrCreateConversation, getLatestItinerary, getAccountStats, getRecentMessages, updateConversation, resolvePhone, listItineraries, getItineraryForPhone } from '../services/database.service'
+import { getOrCreateConversation, getLatestItinerary, getAccountStats, getRecentMessages, updateConversation, resolvePhone, listItineraries, getItineraryForPhone, updateItinerary } from '../services/database.service'
 import { sendWithTyping } from '../services/whatsapp.service'
 import { processMessage, responderOfertaGuia, receberFoto, criarRoteiroPeloApp, PedidoRoteiroApp } from '../agents/sol.agent'
 import { traduzir, IDIOMAS } from '../services/traducao.service'
@@ -8,7 +8,7 @@ import { config } from '../config'
 import { transcribeAudio } from '../services/media.service'
 import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
-import { getAlbum } from '../services/album.service'
+import { getAlbum, estadoDoAlbum, apagarFotoDoAlbum, MENSAGEM_BLOQUEIO } from '../services/album.service'
 import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigo, telefoneDoPedido, pedidoExiste } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
 import { fotoDoLocal, fotosLigadas } from '../services/fotos-lugar.service'
@@ -19,6 +19,7 @@ import {
 import { log } from '../logger'
 import { excedeu, limitar, podeHoje, segredoConfere } from '../middleware/limites'
 import { excluirConta } from '../services/conta.service'
+import prisma from '../services/database.service'
 import { salvarFotoPerfil } from '../services/perfil-foto.service'
 
 const router = Router()
@@ -184,6 +185,7 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
       },
       regras: config.regras,
       recursos: { fotosLocais: fotosLigadas() },
+      admin: ehAdmin(phone),
       // Roteiros gerados nesta semana (RA-ROT-01) e cadastro/aceites do app
       cota: { ...cota, limite: conv.hasCompanion ? config.regras.guiaRoteirosSemana : config.regras.roteirosGratisSemana },
       cadastro,
@@ -335,6 +337,9 @@ router.post(
     const foto = req.body
     if (!Buffer.isBuffer(foto) || foto.length < 500) { res.status(400).json({ error: 'Foto vazia' }); return }
     const mimeType = String(req.headers['content-type'] || 'image/jpeg').split(';')[0]
+    // Regra do mural: foto só com a Guia Sol e durante a viagem
+    const estado = await estadoDoAlbum(phone)
+    if (!estado.podeEnviar) { res.status(403).json({ error: MENSAGEM_BLOQUEIO[estado.motivo!], motivo: estado.motivo }); return }
     try {
       cancelGuiaReminder(phone)
       let avisarSalva: (url: string) => void = () => {}
@@ -405,7 +410,9 @@ router.post('/api/app/roteiros/criar', clientAuthMiddleware, async (req: Request
   const conv = await getOrCreateConversation(phone)
   const maxDias = conv.hasCompanion ? config.regras.maxDiasComGuia : config.regras.maxDiasSemGuia
   const dias = Math.round((Date.parse(`${b.saida}T12:00:00Z`) - Date.parse(`${b.chegada}T12:00:00Z`)) / 86400000) + 1
-  if (dias > maxDias) { res.status(400).json({ error: `O roteiro pode ter até ${maxDias} dias` }); return }
+  if (dias > maxDias) {
+    res.status(400).json({ error: conv.hasCompanion ? `Com a Guia, o roteiro pode ter até ${maxDias} dias` : 'Sem a Guia Sol, o roteiro grátis cobre 1 dia. Com a Guia, até 7 dias.' }); return
+  }
   // Cota semanal (RA-ROT): grátis N por semana; com a Guia (ou no modo demonstração) o teto da Guia
   const cota = await roteirosDaSemana(phone)
   const limiteSemana = conv.hasCompanion || config.demoFreeMode ? config.regras.guiaRoteirosSemana : config.regras.roteirosGratisSemana
@@ -631,11 +638,86 @@ router.post('/api/app/presenca', clientAuthMiddleware, async (req: Request, res:
 router.get('/api/app/album', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
   try {
-    res.json(await getAlbum(phone))
+    const [album, envio] = await Promise.all([getAlbum(phone), estadoDoAlbum(phone)])
+    res.json({ ...album, envio })
   } catch (err) {
     log.error('erro ao montar o álbum do app', err, { phone, step: 'app-album' })
     res.status(500).json({ error: 'Erro interno' })
   }
+})
+
+// ─── POST /api/app/album/apagar ──────────────────────────────────────────────
+// Apaga uma foto da própria pessoa (vale sempre, inclusive depois da viagem)
+router.post('/api/app/album/apagar', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const { url } = req.body ?? {}
+  if (typeof url !== 'string' || !/^https:\/\//.test(url)) { res.status(400).json({ error: 'Foto inválida' }); return }
+  try {
+    const ok = await apagarFotoDoAlbum(phone, url)
+    if (!ok) { res.status(404).json({ error: 'Foto não encontrada' }); return }
+    res.json({ ok: true })
+  } catch (err) {
+    log.error('erro ao apagar foto do álbum', err, { phone, step: 'app-album-apagar' })
+    res.status(500).json({ error: 'Não consegui apagar agora' })
+  }
+})
+
+// ─── Administração (telefones em ADMIN_PHONES): liberar recursos para testes ──
+const ehAdmin = (phone: string) => config.adminPhones.includes(phone.replace(/\D/g, ''))
+function adminAppAuth(req: Request, res: Response, next: NextFunction) {
+  clientAuthMiddleware(req, res, () => {
+    if (!ehAdmin((req as any).clientPhone)) { res.status(403).json({ error: 'Sem permissão' }); return }
+    next()
+  })
+}
+const normalizarAlvo = (v: unknown) => (typeof v === 'string' ? v.replace(/\D/g, '') : '')
+
+router.get('/api/app/admin/cliente', adminAppAuth, async (req: Request, res: Response) => {
+  const alvo = normalizarAlvo(req.query.phone)
+  if (alvo.length < 12) { res.status(400).json({ error: 'Telefone inválido' }); return }
+  try {
+    const phone = await resolvePhone(alvo)
+    const conv = await prisma.conversation.findUnique({ where: { phone }, select: { name: true, phone: true, hasCompanion: true, hasPaid: true, freeCredits: true, destination: true, arrivalDate: true, departureDate: true } })
+    if (!conv) { res.status(404).json({ error: 'Cliente não encontrado' }); return }
+    const [cota, cadastro, ultimo, album] = await Promise.all([roteirosDaSemana(phone), lerCadastro(phone), getLatestItinerary(phone), estadoDoAlbum(phone)])
+    res.json({ ...conv, cota, cadastro: { concluidoEm: cadastro.concluidoEm, gostos: cadastro.gostos }, ultimoRoteiro: ultimo ? { id: ultimo.id, destino: ultimo.destination, chegada: ultimo.arrivalDate, saida: ultimo.departureDate, status: ultimo.status, pdf: !!ultimo.pdfUrl } : null, album })
+  } catch (err) {
+    log.error('erro na consulta admin', err, { step: 'admin' })
+    res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+router.post('/api/app/admin/cliente/guia', adminAppAuth, async (req: Request, res: Response) => {
+  const alvo = normalizarAlvo(req.body?.phone)
+  if (alvo.length < 12 || typeof req.body?.ativa !== 'boolean') { res.status(400).json({ error: 'Informe phone e ativa' }); return }
+  const phone = await resolvePhone(alvo)
+  await getOrCreateConversation(phone)
+  await updateConversation(phone, { hasCompanion: req.body.ativa })
+  log.info('admin: guia alterada', { phone, step: 'admin', data: { por: (req as any).clientPhone, ativa: req.body.ativa } })
+  res.json({ ok: true })
+})
+
+router.post('/api/app/admin/cliente/credito', adminAppAuth, async (req: Request, res: Response) => {
+  const alvo = normalizarAlvo(req.body?.phone)
+  const n = Number(req.body?.quantidade)
+  if (alvo.length < 12 || !Number.isInteger(n) || n < -10 || n > 10 || n === 0) { res.status(400).json({ error: 'Informe phone e quantidade (-10 a 10)' }); return }
+  const phone = await resolvePhone(alvo)
+  await getOrCreateConversation(phone)
+  await prisma.conversation.update({ where: { phone }, data: { freeCredits: { increment: n } } })
+  log.info('admin: créditos alterados', { phone, step: 'admin', data: { por: (req as any).clientPhone, n } })
+  res.json({ ok: true })
+})
+
+router.post('/api/app/admin/cliente/pago', adminAppAuth, async (req: Request, res: Response) => {
+  const alvo = normalizarAlvo(req.body?.phone)
+  if (alvo.length < 12) { res.status(400).json({ error: 'Telefone inválido' }); return }
+  const phone = await resolvePhone(alvo)
+  await getOrCreateConversation(phone)
+  await updateConversation(phone, { hasPaid: true })
+  const ultimo = await getLatestItinerary(phone)
+  if (ultimo && ultimo.status === 'pending') await updateItinerary(ultimo.id, { status: 'paid' })
+  log.info('admin: marcado como pago', { phone, step: 'admin', data: { por: (req as any).clientPhone } })
+  res.json({ ok: true })
 })
 
 // ─── POST /api/app/guia ──────────────────────────────────────────────────────

@@ -716,6 +716,12 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   // Descobre quantos dias de roteiro
   const days = await classifyDays(data_chegada, data_saida, phone)
 
+  // RA-ROT-01: sem a Guia, o roteiro grátis cobre 1 dia (dias pagos ainda não existem)
+  if (!existingConv.hasCompanion && days > 1) {
+    return responder(phone, channel,
+      `Sem a Guia Sol, o roteiro grátis cobre 1 dia. Posso montar só o dia ${formatarData(data_chegada)} em ${destino}, ou você ativa a Guia Sol e eu monto os ${days} dias. O que prefere?`, 600)
+  }
+
   // Verifica e desconta crédito grátis via Edge Function
   // DEMO_FREE_MODE (temporário): trata como se tivesse crédito, sem descontar nada de verdade
   const hasFreeCredit = config.demoFreeMode || await checkAndDeductCredit(phone, resolvedName)
