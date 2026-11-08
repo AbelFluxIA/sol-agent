@@ -19,6 +19,7 @@ import {
 import { log } from '../logger'
 import { excedeu, limitar, podeHoje, segredoConfere } from '../middleware/limites'
 import { excluirConta } from '../services/conta.service'
+import { salvarFotoPerfil } from '../services/perfil-foto.service'
 
 const router = Router()
 
@@ -207,7 +208,16 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
 // Atualiza dados editáveis do perfil do cliente
 router.patch('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
-  const { name, destination, arrivalDate, departureDate, arrivalTime, originCity } = req.body
+  const { name, destination, arrivalDate, departureDate, arrivalTime, originCity, instagram } = req.body
+
+  // Instagram: aceita "@usuario", "usuario" ou o link do perfil; guarda só o usuário
+  let instagramLimpo: string | null | undefined
+  if (typeof instagram === 'string') {
+    const u = instagram.trim().replace(/^https?:\/\/(www\.)?instagram\.com\//i, '').replace(/^@/, '').replace(/[/?#].*$/, '')
+    if (u === '') instagramLimpo = null
+    else if (/^[A-Za-z0-9._]{1,30}$/.test(u)) instagramLimpo = u
+    else { res.status(400).json({ error: 'Instagram inválido: use só o nome de usuário (letras, números, ponto e sublinhado)' }); return }
+  }
 
   const allowed: Record<string, any> = {}
   if (typeof name === 'string' && name.trim()) allowed.name = name.trim()
@@ -217,13 +227,14 @@ router.patch('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: 
   if (typeof arrivalTime === 'string') allowed.arrivalTime = arrivalTime || null
   if (typeof originCity === 'string') allowed.originCity = originCity.trim() || null
 
-  if (Object.keys(allowed).length === 0) {
+  if (Object.keys(allowed).length === 0 && instagramLimpo === undefined) {
     res.status(400).json({ error: 'Nenhum campo válido para atualizar' })
     return
   }
 
   try {
-    await updateConversation(phone, allowed)
+    if (Object.keys(allowed).length) await updateConversation(phone, allowed)
+    if (instagramLimpo !== undefined) await salvarCadastro(phone, { instagram: instagramLimpo })
     res.json({ ok: true })
   } catch (err) {
     log.error('erro ao atualizar perfil', err, { phone, step: 'app-perfil-patch' })
@@ -287,6 +298,26 @@ router.post(
     } catch (err) {
       log.error('erro no áudio do app', err, { phone, step: 'app-audio' })
       res.status(500).json({ error: 'Erro ao processar o áudio' })
+    }
+  },
+)
+
+// ─── POST /api/app/perfil/foto ───────────────────────────────────────────────
+// Foto de perfil (corpo = a imagem). Devolve a URL pública já recortada.
+router.post(
+  '/api/app/perfil/foto',
+  clientAuthMiddleware,
+  express.raw({ type: 'image/*', limit: '10mb' }),
+  async (req: Request, res: Response) => {
+    const phone = (req as any).clientPhone as string
+    const foto = req.body
+    if (!Buffer.isBuffer(foto) || foto.length < 500) { res.status(400).json({ error: 'Foto vazia' }); return }
+    if (!podeHoje('perfil-foto', phone, 10)) { res.status(429).json({ error: 'Muitas trocas de foto hoje. Tente amanhã.' }); return }
+    try {
+      res.json({ ok: true, fotoUrl: await salvarFotoPerfil(phone, foto) })
+    } catch (err) {
+      log.error('erro ao salvar foto de perfil', err, { phone, step: 'perfil-foto' })
+      res.status(500).json({ error: 'Não consegui salvar a foto. Tente outra imagem.' })
     }
   },
 )
@@ -367,6 +398,9 @@ router.post('/api/app/roteiros/criar', clientAuthMiddleware, async (req: Request
   if (typeof b.destino !== 'string' || b.destino.trim().length < 2 || !data.test(b.chegada) || !data.test(b.saida) || b.saida < b.chegada) {
     res.status(400).json({ error: 'Confira destino e datas' }); return
   }
+  // Data no passado (com 1 dia de folga para fusos a oeste de Brasília): recusa aqui, senão o app ficaria esperando um roteiro que não vem
+  const ontem = new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  if (b.chegada < ontem) { res.status(400).json({ error: 'A data de chegada já passou. Escolha uma data a partir de hoje.' }); return }
   // Duração máxima: 5 dias sem a Guia, 7 com a Guia (RA-ROT-24)
   const conv = await getOrCreateConversation(phone)
   const maxDias = conv.hasCompanion ? config.regras.maxDiasComGuia : config.regras.maxDiasSemGuia

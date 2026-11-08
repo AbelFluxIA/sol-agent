@@ -384,7 +384,7 @@ export async function processMessage(
   const response = await openai.chat.completions.create({
     model: config.openai.model,
     messages: [
-      { role: 'system', content: buildSolSystemPrompt() + profileContext + guiaContext },
+      { role: 'system', content: (profileContext ? profileContext.trim() + '\n\n' : '') + buildSolSystemPrompt() + guiaContext },
       ...history,
     ],
     tools: solTools,
@@ -634,12 +634,19 @@ export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp): P
 // Handler: reenviar_roteiro (link interativo + PDF do último roteiro pronto)
 // ----------------------------------------------------------------
 async function handleReenviarRoteiro(phone: string, channel: Canal): Promise<string> {
+  // Último pedido ainda em andamento (gerando ou aguardando pagamento): avisa em vez de reenviar um antigo
+  const ultimo = await getLatestItinerary(phone)
+  if (ultimo && !ultimo.pdfUrl && Date.now() - new Date(ultimo.createdAt).getTime() < 15 * 60 * 1000) {
+    return responder(phone, channel, ultimo.status === 'pending' && !config.demoFreeMode && !(await getOrCreateConversation(phone)).hasPaid
+      ? `Seu roteiro${ultimo.destination ? ` de ${ultimo.destination}` : ''} fica pronto assim que o pagamento for confirmado. Se já pagou, me avisa que eu confiro.`
+      : `Seu roteiro${ultimo.destination ? ` de ${ultimo.destination}` : ''} está sendo preparado. Chega aqui em instantes. ☀️`, 600)
+  }
   const it = await getLatestReadyItinerary(phone)
   if (!it?.pdfUrl) {
     return responder(phone, channel, 'Você ainda não tem um roteiro pronto comigo. Quer montar um agora? Me diz o destino e as datas.', 600)
   }
-  const code = await shareCodeDoRoteiro(phone, it.pdfUrl)
-  const destino = (await getOrCreateConversation(phone)).destination
+  const code = await shareCodeDoRoteiro(it.pdfUrl)
+  const destino = it.destination
   const intro = `Aqui está o seu roteiro${destino ? ` de ${destino}` : ''}. ✅`
   if (code) {
     const url = `${config.appPublicUrl}/r/${code}`
@@ -678,9 +685,10 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   // as datas de uma viagem antiga da conversa (ex.: pediu Curitiba em outubro, voltou em novembro)
   const hoje = hojeBrasil()
   const iso = /^\d{4}-\d{2}-\d{2}$/
-  if (!iso.test(data_chegada) || !iso.test(data_saida) || data_chegada < hoje || data_saida < data_chegada) {
+  const formatoOk = iso.test(data_chegada) && iso.test(data_saida)
+  if (!formatoOk || data_chegada < hoje || data_saida < data_chegada) {
     log.info('roteiro recusado: datas inválidas ou passadas', { phone, data: { data_chegada, data_saida, hoje } })
-    return responder(phone, channel, data_chegada < hoje
+    return responder(phone, channel, formatoOk && data_chegada < hoje
       ? `Essas datas (${formatarData(data_chegada)}) já passaram. Para quando é a viagem? Me diz o dia de chegada e o de volta.`
       : 'Não entendi as datas. Me diz o dia de chegada e o de volta (por exemplo, 20/12 a 22/12).', 600)
   }

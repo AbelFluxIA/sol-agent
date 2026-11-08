@@ -53,7 +53,9 @@ export async function excluirConta(phone: string): Promise<ResumoExclusao> {
   for (const m of murais) fotosMural.push(...await ler<{ photo_url: string }>('mural_photos', `mural_id=eq.${m.id}&select=photo_url`))
   const pdfs = await ler<{ pdf_url: string | null }>('generated_itineraries', `${f}&select=pdf_url`)
   const roteirosPrisma = await prisma.itinerary.findMany({ where: { conversation: { phone } }, select: { pdfUrl: true } })
+  const fotoPerfil = await prisma.$queryRaw<{ foto_url: string | null }[]>`select foto_url from public.sol_cadastro where phone = ${phone}`
   resumo.arquivos = await apagarArquivos([
+    fotoPerfil[0]?.foto_url,
     ...fotos.map(x => x.photo_url),
     ...fotosMural.map(x => x.photo_url),
     ...pdfs.map(x => x.pdf_url),

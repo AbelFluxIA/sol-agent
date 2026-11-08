@@ -63,6 +63,8 @@ export interface Cadastro {
   gostos: string[]                       // tipos de passeio que a pessoa mais gosta (onboarding)
   viagem: { destino: string; chegada: string | null; saida: string | null } | null // viagem em mente
   lugaresDesejados: string[]             // lugares que tem vontade de conhecer
+  fotoUrl: string | null                 // foto de perfil (bucket público "perfis", nome aleatório)
+  instagram: string | null               // só o usuário, sem @
 }
 
 const dia = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null)
@@ -71,8 +73,9 @@ export async function lerCadastro(phone: string): Promise<Cadastro> {
   const r = await prisma.$queryRaw<{
     nascimento: Date | null; cadastro_concluido_em: Date | null; gostos: string[] | null
     viagem_destino: string | null; viagem_chegada: Date | null; viagem_saida: Date | null; lugares_desejados: string[] | null
+    foto_url: string | null; instagram: string | null
   }[]>`
-    select nascimento, cadastro_concluido_em, gostos, viagem_destino, viagem_chegada, viagem_saida, lugares_desejados
+    select nascimento, cadastro_concluido_em, gostos, viagem_destino, viagem_chegada, viagem_saida, lugares_desejados, foto_url, instagram
     from public.sol_cadastro where phone = ${phone}`
   const c = r[0]
   return {
@@ -81,19 +84,24 @@ export async function lerCadastro(phone: string): Promise<Cadastro> {
     gostos: c?.gostos ?? [],
     viagem: c?.viagem_destino ? { destino: c.viagem_destino, chegada: dia(c.viagem_chegada), saida: dia(c.viagem_saida) } : null,
     lugaresDesejados: c?.lugares_desejados ?? [],
+    fotoUrl: c?.foto_url ?? null,
+    instagram: c?.instagram ?? null,
   }
 }
 
 export async function salvarCadastro(phone: string, dados: {
   nascimento?: string; concluir?: boolean; gostos?: string[]
   viagem?: { destino: string; chegada?: string; saida?: string } | null; lugaresDesejados?: string[]
+  fotoUrl?: string | null; instagram?: string | null   // null apaga; undefined mantém
 }) {
   await prisma.$executeRaw`
-    insert into public.sol_cadastro (phone, nascimento, cadastro_concluido_em, gostos, viagem_destino, viagem_chegada, viagem_saida, lugares_desejados, atualizado_em)
+    insert into public.sol_cadastro (phone, nascimento, cadastro_concluido_em, gostos, viagem_destino, viagem_chegada, viagem_saida, lugares_desejados, foto_url, instagram, atualizado_em)
     values (${phone}, ${dados.nascimento ?? null}::date, ${dados.concluir ? new Date() : null},
             ${dados.gostos ?? null}::text[], ${dados.viagem?.destino ?? null}, ${dados.viagem?.chegada ?? null}::date, ${dados.viagem?.saida ?? null}::date,
-            ${dados.lugaresDesejados ?? null}::text[], now())
+            ${dados.lugaresDesejados ?? null}::text[], ${dados.fotoUrl ?? null}, ${dados.instagram ?? null}, now())
     on conflict (phone) do update set
+      foto_url = case when ${dados.fotoUrl === undefined} then sol_cadastro.foto_url else excluded.foto_url end,
+      instagram = case when ${dados.instagram === undefined} then sol_cadastro.instagram else excluded.instagram end,
       nascimento = coalesce(excluded.nascimento, sol_cadastro.nascimento),
       cadastro_concluido_em = coalesce(sol_cadastro.cadastro_concluido_em, excluded.cadastro_concluido_em),
       gostos = coalesce(excluded.gostos, sol_cadastro.gostos),

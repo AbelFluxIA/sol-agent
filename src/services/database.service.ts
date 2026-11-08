@@ -442,13 +442,9 @@ export async function getLatestReadyItinerary(phone: string) {
   })
 }
 
-// Código do link /r/<code> do roteiro: casa pelo PDF (exato) e, se não achar, pelo telefone
-export async function shareCodeDoRoteiro(phone: string, pdfUrl: string): Promise<string | null> {
+// Código do link /r/<code> do roteiro: só pelo PDF exato (sem isso, poderia casar outra viagem)
+export async function shareCodeDoRoteiro(pdfUrl: string): Promise<string | null> {
   const porPdf = await prisma.$queryRaw<{ code: string }[]>`
     select share_code::text as code from public.generated_itineraries where pdf_url = ${pdfUrl} and share_code is not null limit 1`
-  if (porPdf[0]?.code) return porPdf[0].code
-  const porFone = await prisma.$queryRaw<{ code: string }[]>`
-    select share_code::text as code from public.generated_itineraries
-    where phone = ${phone} and share_code is not null order by created_at desc limit 1`
-  return porFone[0]?.code ?? null
+  return porPdf[0]?.code ?? null
 }
