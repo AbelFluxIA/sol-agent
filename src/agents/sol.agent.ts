@@ -4,6 +4,7 @@
 
 import OpenAI from 'openai'
 import { config } from '../config'
+import { lerCadastro } from '../services/presenca.service'
 import { log } from '../logger'
 import { buildSolSystemPrompt } from '../prompts/sol.prompts'
 import { solTools, GerarRoteirArgs, RoteiroPersonalizadoArgs, BuscarSugestaoArgs } from '../tools/sol.tools'
@@ -21,6 +22,8 @@ import {
   addFreeCredit,
   getAccountStats,
   contarMensagensDeHoje,
+  getLatestReadyItinerary,
+  shareCodeDoRoteiro,
 } from '../services/database.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
@@ -58,6 +61,10 @@ const reasoningEffortParam = config.openai.reasoningEffort
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
+
+// Hoje em Brasília, como "AAAA-MM-DD" (comparável com as datas das viagens)
+const hojeBrasil = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+const formatarData = (iso: string) => (/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : iso)
 
 // Responde no canal em uso: salva no banco (a conversa aparece igual no app e no
 // WhatsApp) e só envia pelo WhatsApp quando a pessoa está lá.
@@ -250,12 +257,25 @@ async function buildProfileContext(phone: string, conversation: { name: string |
   const parts: string[] = []
   if (conversation.name) parts.push(`Nome do cliente: ${conversation.name}.`)
 
+  const hoje = hojeBrasil()
   const history = (await getTripHistory(phone, 5))
     .filter(h => h.destination)
-    .map(h => `- ${h.destination} (${h.arrivalDate ?? '?'} a ${h.departureDate ?? '?'}) [${h.status}]`)
+    .map(h => {
+      const passada = !!h.departureDate && h.departureDate < hoje
+      return `- ${h.destination} (${h.arrivalDate ?? '?'} a ${h.departureDate ?? '?'}) [${h.status}]${passada ? ' [VIAGEM PASSADA: não reutilize essas datas]' : ''}`
+    })
   if (history.length > 0) {
-    parts.push(`Histórico de viagens deste cliente (mais recente primeiro):\n${history.join('\n')}`)
+    parts.push(`Histórico de viagens deste cliente (mais recente primeiro):\n${history.join('\n')}\nPara um roteiro novo, SEMPRE pergunte destino e datas novas; nunca gere com datas de uma viagem passada. Hoje é ${hoje}.`)
   }
+
+  // Viagem que a pessoa disse ter em mente no cadastro do app (só se ainda não passou)
+  try {
+    const cad = await lerCadastro(phone)
+    if (cad.viagem && (!cad.viagem.chegada || cad.viagem.chegada >= hoje)) {
+      parts.push(`Viagem em mente informada no cadastro: ${cad.viagem.destino}${cad.viagem.chegada ? ` de ${cad.viagem.chegada}` : ''}${cad.viagem.saida ? ` a ${cad.viagem.saida}` : ''}. Pode oferecer montar o roteiro dela, confirmando as datas.`)
+    }
+    if (cad.gostos.length) parts.push(`Gostos informados no cadastro: ${cad.gostos.join(', ')}.`)
+  } catch { /* cadastro indisponível: segue sem */ }
 
   if (parts.length === 0) return ''
   return `\n\n[PERFIL DO CLIENTE — cliente recorrente. Use isso para não repetir perguntas já respondidas e cumprimentar de forma personalizada:\n${parts.join('\n')}]`
@@ -357,7 +377,7 @@ export async function processMessage(
       const refLink = `https://wa.me/${config.whatsappNumber}?text=${refText}`
       guiaContext = `\n\n[PÓS-VIAGEM. Link de indicação do cliente: ${refLink}]\nREGRA: se o cliente mencionar uma nota de probabilidade de indicação >= 5 (escala 0-10), inclua o link de indicação na resposta e mencione que cada amigo que contratar ganha ele 1 roteiro grátis. Se a nota for < 5, NÃO mencione indicação — foque no feedback e no que pode melhorar.`
     } else {
-      guiaContext = '\n\n[hasCompanion: false. MODO LIMITADO: não dê orientações sobre o roteiro atual do cliente. Responda apenas dúvidas gerais de viagem, geração de novos roteiros ou informações sobre o serviço.]'
+      guiaContext = '\n\n[hasCompanion: false. MODO LIMITADO: não dê orientações sobre o roteiro atual do cliente. Responda apenas dúvidas gerais de viagem, geração de novos roteiros ou informações sobre o serviço. Reenviar o link/PDF de um roteiro já pronto é SEMPRE permitido: chame a tool reenviar_roteiro.]'
     }
   }
 
@@ -407,6 +427,8 @@ export async function processMessage(
       toolReply = await handlePedirFotoStory(phone, channel)
     } else if (toolName === 'buscar_sugestao_confiavel') {
       toolReply = await handleBuscarSugestaoConfiavel(phone, toolArgs as BuscarSugestaoArgs, channel)
+    } else if (toolName === 'reenviar_roteiro') {
+      toolReply = await handleReenviarRoteiro(phone, channel)
     }
     if (channel === 'app') return toolReply ?? 'Feito!'
     return
@@ -609,6 +631,33 @@ export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp): P
 }
 
 // ----------------------------------------------------------------
+// Handler: reenviar_roteiro (link interativo + PDF do último roteiro pronto)
+// ----------------------------------------------------------------
+async function handleReenviarRoteiro(phone: string, channel: Canal): Promise<string> {
+  const it = await getLatestReadyItinerary(phone)
+  if (!it?.pdfUrl) {
+    return responder(phone, channel, 'Você ainda não tem um roteiro pronto comigo. Quer montar um agora? Me diz o destino e as datas.', 600)
+  }
+  const code = await shareCodeDoRoteiro(phone, it.pdfUrl)
+  const destino = (await getOrCreateConversation(phone)).destination
+  const intro = `Aqui está o seu roteiro${destino ? ` de ${destino}` : ''}. ✅`
+  if (code) {
+    const url = `${config.appPublicUrl}/r/${code}`
+    await saveMessage(phone, 'assistant', `${intro}\n${url}`)
+    if (channel === 'whatsapp') {
+      try { await sendCtaButton(phone, intro, 'Abrir roteiro', url) } catch { await sendWithTyping(phone, `${intro}\n\n${url}`, 500) }
+      await sleep(1200)
+    }
+  }
+  const pdfMsg = `${code ? 'E o' : intro + ' O'} PDF completo para salvar e consultar offline 📄`
+  await saveMessage(phone, 'assistant', `${pdfMsg}\n${it.pdfUrl}`)
+  if (channel === 'whatsapp') {
+    try { await sendCtaButton(phone, pdfMsg, 'Baixar PDF', it.pdfUrl) } catch { await sendWithTyping(phone, `${pdfMsg}\n\n${it.pdfUrl}`, 500) }
+  }
+  return code ? `${intro}\n${config.appPublicUrl}/r/${code}\n\n${pdfMsg}\n${it.pdfUrl}` : `${pdfMsg}\n${it.pdfUrl}`
+}
+
+// ----------------------------------------------------------------
 // Handler: gerar_roteiro_de_viagem
 // ----------------------------------------------------------------
 async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel: Canal = 'whatsapp'): Promise<string> {
@@ -624,6 +673,17 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
     horario_volta,
     cidade_origem,
   } = args
+
+  // Datas no passado não geram roteiro nem são gravadas: o modelo às vezes reaproveita
+  // as datas de uma viagem antiga da conversa (ex.: pediu Curitiba em outubro, voltou em novembro)
+  const hoje = hojeBrasil()
+  const iso = /^\d{4}-\d{2}-\d{2}$/
+  if (!iso.test(data_chegada) || !iso.test(data_saida) || data_chegada < hoje || data_saida < data_chegada) {
+    log.info('roteiro recusado: datas inválidas ou passadas', { phone, data: { data_chegada, data_saida, hoje } })
+    return responder(phone, channel, data_chegada < hoje
+      ? `Essas datas (${formatarData(data_chegada)}) já passaram. Para quando é a viagem? Me diz o dia de chegada e o de volta.`
+      : 'Não entendi as datas. Me diz o dia de chegada e o de volta (por exemplo, 20/12 a 22/12).', 600)
+  }
 
   // Se o modelo passou "não informado" para o nome, usa o nome já salvo na conversa
   const existingConv = await getOrCreateConversation(phone)

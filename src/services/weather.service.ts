@@ -108,9 +108,13 @@ export async function getWeatherAndMarine(
   }
 }
 
+// Datas "AAAA-MM-DD" viram meio-dia local: new Date('AAAA-MM-DD') é meia-noite UTC e,
+// com TZ=America/Sao_Paulo, getDay() devolvia o dia anterior (domingo virava "Sábado")
+const meioDia = (iso: string) => new Date(`${iso}T12:00:00`)
+
 export function isMondayInRange(startDate: string, endDate: string): boolean {
-  const start = new Date(startDate)
-  const end = new Date(endDate)
+  const start = meioDia(startDate)
+  const end = meioDia(endDate)
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
     if (d.getDay() === 1) return true
   }
@@ -119,8 +123,8 @@ export function isMondayInRange(startDate: string, endDate: string): boolean {
 
 export function getDaysOfWeek(startDate: string, endDate: string): string[] {
   const days = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado']
-  const start = new Date(startDate)
-  const end = new Date(endDate)
+  const start = meioDia(startDate)
+  const end = meioDia(endDate)
   const result: string[] = []
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
     result.push(days[d.getDay()])

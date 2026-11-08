@@ -431,3 +431,24 @@ export async function getAccountStats(phone: string) {
     convertedReferrals: referrals.filter(r => r.hasPaid).length,
   }
 }
+
+// Último roteiro com PDF pronto (ignora os "pending" sem texto)
+export async function getLatestReadyItinerary(phone: string) {
+  const conversation = await prisma.conversation.findUnique({ where: { phone }, select: { id: true } })
+  if (!conversation) return null
+  return prisma.itinerary.findFirst({
+    where: { conversationId: conversation.id, pdfUrl: { not: null } },
+    orderBy: { createdAt: 'desc' },
+  })
+}
+
+// Código do link /r/<code> do roteiro: casa pelo PDF (exato) e, se não achar, pelo telefone
+export async function shareCodeDoRoteiro(phone: string, pdfUrl: string): Promise<string | null> {
+  const porPdf = await prisma.$queryRaw<{ code: string }[]>`
+    select share_code::text as code from public.generated_itineraries where pdf_url = ${pdfUrl} and share_code is not null limit 1`
+  if (porPdf[0]?.code) return porPdf[0].code
+  const porFone = await prisma.$queryRaw<{ code: string }[]>`
+    select share_code::text as code from public.generated_itineraries
+    where phone = ${phone} and share_code is not null order by created_at desc limit 1`
+  return porFone[0]?.code ?? null
+}

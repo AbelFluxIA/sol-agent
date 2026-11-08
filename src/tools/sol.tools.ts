@@ -97,6 +97,15 @@ NUNCA escreva apenas "viajante econômico" sem especificar o tipo de experiênci
   {
     type: 'function',
     function: {
+      name: 'reenviar_roteiro',
+      description:
+        'Reenvia o link interativo e o PDF do último roteiro JÁ GERADO do cliente. Use SOMENTE quando ele pedir o roteiro pronto de novo ("me manda o roteiro", "mostra meu último roteiro", "perdi o PDF", "cadê o link"). Não use para criar ou alterar roteiro.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'pedir_foto_story',
       description:
         'Pede ao cliente uma foto para gerar uma imagem personalizada da viagem para compartilhar no Instagram/Stories. Use quando o cliente pedir explicitamente para gerar uma foto do Instagram, story, ou imagem da viagem.',
