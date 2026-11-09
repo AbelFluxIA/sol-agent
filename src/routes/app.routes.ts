@@ -1,6 +1,6 @@
 import express, { Router, Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
-import { getOrCreateConversation, getLatestItinerary, getAccountStats, getRecentMessages, updateConversation, resolvePhone, listItineraries, getItineraryForPhone, updateItinerary } from '../services/database.service'
+import { getOrCreateConversation, getLatestItinerary, getAccountStats, getRecentMessages, updateConversation, resolvePhone, listItineraries, getItineraryForPhone, updateItinerary, phoneVariants } from '../services/database.service'
 import { sendWithTyping } from '../services/whatsapp.service'
 import { processMessage, responderOfertaGuia, receberFoto, criarRoteiroPeloApp, PedidoRoteiroApp } from '../agents/sol.agent'
 import { traduzir, IDIOMAS } from '../services/traducao.service'
@@ -663,7 +663,11 @@ router.post('/api/app/album/apagar', clientAuthMiddleware, async (req: Request, 
 })
 
 // ─── Administração (telefones em ADMIN_PHONES): liberar recursos para testes ──
-const ehAdmin = (phone: string) => config.adminPhones.includes(phone.replace(/\D/g, ''))
+// Compara nas duas formas do número brasileiro (com e sem o 9), dos dois lados
+const ehAdmin = (phone: string) => {
+  const meus = new Set(phoneVariants(phone.replace(/\D/g, '')))
+  return config.adminPhones.some(a => phoneVariants(a).some(v => meus.has(v)))
+}
 function adminAppAuth(req: Request, res: Response, next: NextFunction) {
   clientAuthMiddleware(req, res, () => {
     if (!ehAdmin((req as any).clientPhone)) { res.status(403).json({ error: 'Sem permissão' }); return }
