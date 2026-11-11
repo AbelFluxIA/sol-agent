@@ -4,6 +4,7 @@
 
 import OpenAI from 'openai'
 import { config } from '../config'
+import { registrarConversao, limparPrazoGuia } from '../services/indicacao.service'
 import { lerCadastro } from '../services/presenca.service'
 import { log } from '../logger'
 import { buildSolSystemPrompt } from '../prompts/sol.prompts'
@@ -135,6 +136,7 @@ export async function responderOfertaGuia(
   }
   if (config.demoFreeMode) {
     await updateConversation(phone, { hasCompanion: true })
+    await limparPrazoGuia(phone)
     const activationMsg = buildGuiaActivatedMessage(name)
     await saveMessage(phone, 'assistant', activationMsg)
     if (channel === 'whatsapp') await sendHuman(phone, activationMsg)
@@ -908,6 +910,8 @@ export async function generateAndSendItinerary(phone: string, forceDays?: number
     // Salva texto no banco para a Sol Guia usar como contexto
     if (latestIt) {
       await updateItinerary(latestIt.id, { rawItinerary: itineraryText, status: 'generated' })
+      // Veio por convite e a viagem é futura: conta como indicação convertida (RA-IND-03)
+      registrarConversao(phone, arrivalDate).catch(err => log.error('erro ao registrar conversão', err, { phone, step: 'indicacao' }))
     }
 
     // Gera o PDF com o roteiro completo

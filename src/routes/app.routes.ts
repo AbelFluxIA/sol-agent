@@ -19,6 +19,7 @@ import {
 import { log } from '../logger'
 import { excedeu, limitar, podeHoje, segredoConfere } from '../middleware/limites'
 import { excluirConta } from '../services/conta.service'
+import { vincularConvite, resumoIndicacao, resgatarDiasGuia, limparPrazoGuia } from '../services/indicacao.service'
 import prisma from '../services/database.service'
 import { salvarFotoPerfil } from '../services/perfil-foto.service'
 
@@ -530,7 +531,7 @@ router.get('/api/app/foto-local', clientAuthMiddleware, async (req: Request, res
 // Etapas do cadastro (RA-CAD-04/05): nome confirmado, data de nascimento e fim
 router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
-  const { nome, nascimento, concluir, gostos, viagem, lugaresDesejados } = req.body ?? {}
+  const { nome, nascimento, concluir, gostos, viagem, lugaresDesejados, convite } = req.body ?? {}
   if (nascimento !== undefined && (typeof nascimento !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(nascimento) || nascimento > new Date().toISOString().slice(0, 10) || nascimento < '1900-01-01')) {
     res.status(400).json({ error: 'Data de nascimento inválida' }); return
   }
@@ -569,6 +570,10 @@ router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res:
       }
     }
     await salvarCadastro(phone, { nascimento, concluir: concluir === true, gostos: gostosLimpos, viagem: viagemLimpa, lugaresDesejados: textos(lugaresDesejados, 15, 60) })
+    // Cadastro concluído com um convite guardado pelo app: liga a quem convidou (RA-IND-02)
+    if (concluir === true && typeof convite === 'string' && convite) {
+      await vincularConvite(phone, convite).catch(err => log.error('erro ao vincular convite', err, { phone, step: 'indicacao' }))
+    }
     res.json({ ok: true, cadastro: await lerCadastro(phone) })
   } catch (err) {
     log.error('erro ao salvar cadastro', err, { phone, step: 'app-cadastro' })
@@ -589,6 +594,29 @@ router.post('/api/app/conta/excluir', clientAuthMiddleware, async (req: Request,
   } catch (err) {
     log.error('erro ao excluir conta', err, { phone, step: 'excluir-conta' })
     res.status(500).json({ error: 'Não consegui excluir agora. Tente de novo em instantes.' })
+  }
+})
+
+// ─── Indicação de amigos (RA-IND) ────────────────────────────────────────────
+router.get('/api/app/indicacao', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  try {
+    res.json(await resumoIndicacao(phone))
+  } catch (err) {
+    log.error('erro no resumo de indicação', err, { phone, step: 'indicacao' })
+    res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+router.post('/api/app/indicacao/resgatar', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  try {
+    const r = await resgatarDiasGuia(phone, Number(req.body?.dias))
+    if (!r.ok) { res.status(400).json({ error: r.erro }); return }
+    res.json(r)
+  } catch (err) {
+    log.error('erro ao resgatar dias de Guia', err, { phone, step: 'indicacao' })
+    res.status(500).json({ error: 'Não consegui usar o crédito agora' })
   }
 })
 
@@ -697,6 +725,7 @@ router.post('/api/app/admin/cliente/guia', adminAppAuth, async (req: Request, re
   const phone = await resolvePhone(alvo)
   await getOrCreateConversation(phone)
   await updateConversation(phone, { hasCompanion: req.body.ativa })
+  await limparPrazoGuia(phone) // ligada pela administração: sem prazo de crédito
   log.info('admin: guia alterada', { phone, step: 'admin', data: { por: (req as any).clientPhone, ativa: req.body.ativa } })
   res.json({ ok: true })
 })

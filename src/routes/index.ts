@@ -14,6 +14,7 @@ import { generateStoryImage, uploadStoryImage } from '../services/story.service'
 import { buildGuiaActivatedMessage, buildReferralMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
 import { config } from '../config'
+import { limparPrazoGuia } from '../services/indicacao.service'
 import { adminAuth, assinaturaMetaConfere, segredoPagamentoConfere } from '../middleware/limites'
 
 const escaparHtml = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
@@ -363,6 +364,7 @@ router.post('/webhook/payment-guia', async (req: Request, res: Response) => {
     log.info('guia payment confirmado', { phone })
 
     await updateConversation(phone, { hasCompanion: true })
+    await limparPrazoGuia(phone) // Guia paga: sem prazo de crédito
 
     const conv = await getOrCreateConversation(phone)
     const name = conv.name || 'você'

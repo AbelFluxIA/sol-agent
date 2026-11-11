@@ -8,6 +8,7 @@ import routes from './routes'
 import appRoutes from './routes/app.routes'
 import prisma from './services/database.service'
 import { startDailyJobs } from './jobs/daily'
+import { expirarGuiasDeCredito } from './services/indicacao.service'
 import { waitForActiveOperations } from './shutdown'
 
 const app = express()
@@ -62,6 +63,10 @@ async function bootstrap() {
     // ninguém receber mensagem em dobro.
     if (process.env.DISABLE_DAILY_JOBS === 'true') log.info('envios agendados desligados (DISABLE_DAILY_JOBS)', { step: 'bootstrap' })
     else startDailyJobs()
+
+    // Guia ganha por indicação tem prazo: confere de hora em hora (não envia mensagens)
+    setInterval(() => { expirarGuiasDeCredito().catch(err => log.error('erro ao encerrar guias de crédito', err, { step: 'indicacao' })) }, 3600_000).unref()
+    expirarGuiasDeCredito().catch(() => { /* tenta na próxima hora */ })
 
     if (!config.meta.appSecret) log.warn('META_APP_SECRET não definido: a assinatura do webhook do WhatsApp não é conferida', { step: 'bootstrap' })
     if (!config.abacatePay.webhookSecret) log.warn('ABACATEPAY_WEBHOOK_SECRET vazio: webhooks de pagamento recusados', { step: 'bootstrap' })
