@@ -9,7 +9,7 @@ import { transcribeAudio } from '../services/media.service'
 import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
 import { getAlbum, estadoDoAlbum, apagarFotoDoAlbum, MENSAGEM_BLOQUEIO } from '../services/album.service'
-import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigo, telefoneDoPedido, pedidoExiste } from '../services/login.service'
+import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigoDetalhado, telefoneDoPedido, pedidoExiste } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
 import { fotoDoLocal, fotosLigadas } from '../services/fotos-lugar.service'
 import {
@@ -83,6 +83,7 @@ export function clientAuthMiddleware(req: Request, res: Response, next: NextFunc
 router.post('/api/app/auth/pedido', (_req: Request, res: Response) => {
   if (!config.whatsappNumber) { res.status(503).json({ error: 'Número da Sol não configurado' }); return }
   const pedido = criarPedido()
+  log.info('login: pedido criado no app', { step: 'app-auth', data: { pedido } })
   res.json({ pedido, whatsapp: config.whatsappNumber, texto: textoDoPedido(pedido) })
 })
 
@@ -100,7 +101,7 @@ router.post('/api/app/auth/solicitar-otp', limitar('otp-ip', 10, 3600_000), asyn
   // Usa o número da conversa que já existe no WhatsApp (com ou sem o 9)
   const phone = await resolvePhone(typed)
   // No máximo 3 códigos por hora para o mesmo número (ninguém é bombardeado)
-  if (excedeu('otp-fone', phone, 3, 3600_000)) { res.status(429).json({ error: 'Já mandei o código. Espere um pouco antes de pedir outro.' }); return }
+  if (excedeu('otp-fone', phone, 3, 3600_000)) { log.warn('login: pediu código vezes demais (3 por hora)', { phone, step: 'app-auth' }); res.status(429).json({ error: 'Já mandei o código. Espere um pouco antes de pedir outro.' }); return }
   const code = gerarCodigo(phone)
 
   try {
@@ -126,15 +127,18 @@ router.post('/api/app/auth/verificar-otp', limitar('otp-verificar', 30, 600_000)
 
   let phone: string | null = null
   if (typeof pedido === 'string' && pedido) {
-    if (!pedidoExiste(pedido)) { res.status(401).json({ error: 'O pedido expirou. Toque em "Receber código no WhatsApp" de novo.' }); return }
+    if (!pedidoExiste(pedido)) { log.warn('login: tentou entrar com pedido vencido', { step: 'app-auth', data: { pedido: String(pedido).slice(0, 8) } }); res.status(401).json({ error: 'O pedido expirou. Toque em "Receber código no WhatsApp" de novo.' }); return }
     phone = telefoneDoPedido(pedido)
-    if (!phone) { res.status(401).json({ error: 'A Sol ainda não recebeu sua mensagem no WhatsApp. Envie a mensagem e espere o código.' }); return }
+    if (!phone) { log.warn('login: digitou código, mas a mensagem do WhatsApp ainda não chegou', { step: 'app-auth', data: { pedido: String(pedido).slice(0, 8) } }); res.status(401).json({ error: 'A Sol ainda não recebeu sua mensagem no WhatsApp. Envie a mensagem e espere o código.' }); return }
   } else {
     phone = await resolvePhone(normalizePhone(String(rawPhone)))
   }
 
   const revisor = !!config.revisor.phone && !!config.revisor.code && phone === config.revisor.phone
-  if (revisor ? !segredoConfere(String(code), config.revisor.code) : !conferirCodigo(phone, String(code))) {
+  const resultado = revisor ? (segredoConfere(String(code), config.revisor.code) ? 'ok' : 'errado') : conferirCodigoDetalhado(phone, String(code))
+  if (resultado !== 'ok') {
+    const MOTIVOS: Record<string, string> = { 'sem-codigo': 'não havia código ativo para o número', vencido: 'código vencido (10 min)', errado: 'código errado', bloqueado: 'código errado 5 vezes: código cancelado' }
+    log.warn(`login: não entrou (${MOTIVOS[resultado] ?? resultado})`, { phone, step: 'app-auth', data: { motivo: resultado, porPedido: !!pedido } })
     res.status(401).json({ error: 'Código incorreto ou vencido. Confira o código que a Sol mandou.' })
     return
   }
@@ -144,6 +148,24 @@ router.post('/api/app/auth/verificar-otp', limitar('otp-verificar', 30, 600_000)
 
   log.info('login app realizado', { phone, step: 'app-auth', data: { porPedido: !!pedido } })
   res.json({ token, name: conv.name || '', phone })
+})
+
+// ─── POST /api/app/erro-cliente ──────────────────────────────────────────────
+// Erro que aconteceu no aparelho (tela que quebrou). Vai para os logs do painel.
+// Aceita sem sessão (a tela de entrar também pode quebrar); com sessão, guarda o número.
+router.post('/api/app/erro-cliente', limitar('erro-cliente', 20, 3600_000), (req: Request, res: Response) => {
+  const b = req.body ?? {}
+  const txt = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : undefined)
+  let phone: string | undefined
+  try {
+    const auth = req.headers.authorization
+    if (auth?.startsWith('Bearer ')) phone = (jwt.verify(auth.slice(7), JWT_SECRET) as { phone: string }).phone
+  } catch { /* sem sessão válida: registra sem número */ }
+  log.warn(`erro no app: ${txt(b.mensagem, 300) ?? 'sem mensagem'}`, {
+    phone, step: 'app-cliente',
+    data: { origem: txt(b.origem, 20), tela: txt(b.tela, 300), versao: txt(b.versao, 20), aparelho: txt(b.aparelho, 250), nativo: b.nativo === true, pilha: txt(b.pilha, 3000) },
+  })
+  res.status(204).end()
 })
 
 // ─── GET /api/app/perfil ─────────────────────────────────────────────────────
@@ -774,11 +796,11 @@ router.post('/api/app/album/apagar', clientAuthMiddleware, async (req: Request, 
 
 // ─── Administração (telefones em ADMIN_PHONES): liberar recursos para testes ──
 // Compara nas duas formas do número brasileiro (com e sem o 9), dos dois lados
-const ehAdmin = (phone: string) => {
+export const ehAdmin = (phone: string) => {
   const meus = new Set(phoneVariants(phone.replace(/\D/g, '')))
   return config.adminPhones.some(a => phoneVariants(a).some(v => meus.has(v)))
 }
-function adminAppAuth(req: Request, res: Response, next: NextFunction) {
+export function adminAppAuth(req: Request, res: Response, next: NextFunction) {
   clientAuthMiddleware(req, res, () => {
     if (!ehAdmin((req as any).clientPhone)) { res.status(403).json({ error: 'Sem permissão' }); return }
     next()

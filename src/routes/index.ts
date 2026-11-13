@@ -13,6 +13,7 @@ import { transcribeAudio } from '../services/media.service'
 import { generateStoryImage, uploadStoryImage } from '../services/story.service'
 import { buildGuiaActivatedMessage, buildReferralMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
+import { marcarWebhookWhatsapp } from '../services/logs.service'
 import { config } from '../config'
 import { assinaturaAbacateConfere } from '../services/pagamento.service'
 import { confirmarPagamento } from '../services/pagamento-entrega.service'
@@ -133,6 +134,7 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
     }
     const body = req.body
     res.status(200).json({ ok: true })
+    marcarWebhookWhatsapp() // painel de administração: último sinal da Meta
 
     if (body?.object !== 'whatsapp_business_account') return
 

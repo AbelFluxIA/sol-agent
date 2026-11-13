@@ -10,6 +10,9 @@ import prisma from './services/database.service'
 import { startDailyJobs } from './jobs/daily'
 import { expirarGuiasDeCredito } from './services/indicacao.service'
 import { waitForActiveOperations } from './shutdown'
+import adminRoutes from './routes/admin.routes'
+import { definirDestinoDosLogs } from './logger'
+import { guardarLog, iniciarLogsNoBanco, esvaziarLogs, contarPedido } from './services/logs.service'
 
 const app = express()
 
@@ -45,8 +48,32 @@ app.use((_req, res, next) => {
 app.use(express.json({ limit: '200kb', verify: (req, _res, buf) => { (req as any).rawBody = buf } }))
 app.use(express.urlencoded({ extended: true, limit: '50kb' }))
 
+// Registro de cada pedido (painel de administração): tempo e resultado por rota.
+// No banco vão só o que importa: tudo que muda algo (POST etc.), todo erro e toda
+// resposta lenta. As consultas que o app repete a cada poucos segundos (conversa,
+// lista de roteiros, pagamento) ficam só nos contadores em memória.
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/app') && !req.path.startsWith('/webhook')) { next(); return }
+  const inicio = process.hrtime.bigint()
+  res.on('finish', () => {
+    const ms = Number(process.hrtime.bigint() - inicio) / 1e6
+    const rota = `${req.method} ${req.route?.path ?? req.path.replace(/[0-9a-f-]{16,}|\d{6,}/gi, ':id')}`
+    contarPedido(rota, res.statusCode, ms)
+    const phone = (req as any).clientPhone as string | undefined
+    const lento = ms > 3000 && !/chat|roteiros\/criar|audio|transcrever|foto|sugestoes|webhook/.test(req.path)
+    if (res.statusCode >= 500) log.error('pedido com erro do servidor', new Error(`HTTP ${res.statusCode}`), { phone, step: 'http', durationMs: Math.round(ms), data: { rota, status: res.statusCode } })
+    else if (res.statusCode >= 400 && ![401, 404].includes(res.statusCode)) log.warn('pedido recusado', { phone, step: 'http', durationMs: Math.round(ms), data: { rota, status: res.statusCode } })
+    else if (lento) log.warn('pedido lento', { phone, step: 'http', durationMs: Math.round(ms), data: { rota, status: res.statusCode } })
+    else if (req.method !== 'GET' && req.method !== 'OPTIONS' && !req.path.startsWith('/webhook') && !req.path.endsWith('/presenca')) log.info('pedido', { phone, step: 'http', durationMs: Math.round(ms), data: { rota, status: res.statusCode } })
+  })
+  next()
+})
+
 // Rotas do app cliente (auth + perfil)
 app.use('/', appRoutes)
+
+// Painel de administração (só os números em ADMIN_PHONES)
+app.use('/', adminRoutes)
 
 // Rotas principais (WhatsApp, pagamentos, etc.)
 app.use('/', routes)
@@ -56,6 +83,8 @@ async function bootstrap() {
   try {
     // Testa conexão com o banco
     await prisma.$connect()
+    // Histórico de logs no banco (painel de administração). Desligado no modo de teste de carga.
+    if (process.env.MODO_CARGA !== '1') { definirDestinoDosLogs(guardarLog); iniciarLogsNoBanco() }
     log.info('banco de dados conectado', { step: 'bootstrap' })
 
     // DISABLE_DAILY_JOBS=true: não manda os avisos agendados pelo WhatsApp. Usado
@@ -87,9 +116,18 @@ async function bootstrap() {
 async function shutdown(signal: string) {
   log.info(`sinal ${signal} recebido — iniciando shutdown`, { step: 'shutdown' })
   await waitForActiveOperations()
+  await esvaziarLogs()
   await prisma.$disconnect()
   process.exit(0)
 }
+
+// Erros que escaparam de todo tratamento: ficam registrados (aparecem no painel) em vez de sumirem
+process.on('unhandledRejection', (motivo) => { log.error('promessa rejeitada sem tratamento', motivo, { step: 'processo' }) })
+process.on('uncaughtException', (err) => {
+  log.error('erro não tratado no processo', err, { step: 'processo' })
+  // estado desconhecido: grava o que der e deixa o pm2 reiniciar
+  esvaziarLogs().finally(() => process.exit(1))
+})
 
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))

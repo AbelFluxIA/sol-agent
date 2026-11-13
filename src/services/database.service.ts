@@ -1,6 +1,7 @@
 // src/services/database.service.ts
 import { PrismaClient } from '@prisma/client'
 import { log } from '../logger'
+import { canalAtual, type Canal } from './canal.service'
 
 // Singleton do Prisma — uma única conexão para toda a aplicação
 const prisma = new PrismaClient({
@@ -134,7 +135,8 @@ export async function updateConversation(
 export async function saveMessage(
   phone: string,
   role: 'user' | 'assistant' | 'system',
-  content: string
+  content: string,
+  canal: Canal = canalAtual(phone), // onde a conversa está acontecendo (para o painel de administração)
 ) {
   const conversation = await prisma.conversation.findUnique({ where: { phone } })
   if (!conversation) return
@@ -144,6 +146,7 @@ export async function saveMessage(
       conversationId: conversation.id,
       role,
       content,
+      canal,
     },
   })
 }

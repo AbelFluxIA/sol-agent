@@ -43,18 +43,22 @@ export function gerarCodigo(phone: string): string {
   return code
 }
 
-// Confere o código de um número; 5 tentativas erradas invalidam o código
-export function conferirCodigo(phone: string, code: string): boolean {
+// Confere o código de um número; 5 tentativas erradas invalidam o código.
+// Devolve o motivo, para o painel de administração explicar por que alguém não entrou.
+export type ResultadoCodigo = 'ok' | 'sem-codigo' | 'vencido' | 'errado' | 'bloqueado'
+export function conferirCodigoDetalhado(phone: string, code: string): ResultadoCodigo {
   const c = codigos.get(phone)
-  if (!c || c.expiraEm < Date.now()) return false
+  if (!c) return 'sem-codigo'
+  if (c.expiraEm < Date.now()) { codigos.delete(phone); return 'vencido' }
   if (c.code !== code.trim()) {
     c.tentativas++
-    if (c.tentativas >= 5) codigos.delete(phone)
-    return false
+    if (c.tentativas >= 5) { codigos.delete(phone); return 'bloqueado' }
+    return 'errado'
   }
   codigos.delete(phone)
-  return true
+  return 'ok'
 }
+export const conferirCodigo = (phone: string, code: string): boolean => conferirCodigoDetalhado(phone, code) === 'ok'
 
 // Número ligado a um pedido (preenchido quando a mensagem chega no WhatsApp)
 export function telefoneDoPedido(pedido: string): string | null {
@@ -80,6 +84,7 @@ export async function tratarMensagemDeLogin(waId: string, texto: string): Promis
   if (comPedido) {
     const pedido = pedidos.get(comPedido[1].toUpperCase())
     if (pedido && Date.now() - pedido.criadoEm <= VALIDADE_PEDIDO_MS) pedido.phone = phone
+    else log.warn('login: mensagem chegou com pedido vencido ou desconhecido', { phone, step: 'app-auth', data: { pedido: comPedido[1].toUpperCase() } })
   }
   const code = gerarCodigo(phone)
   // Duas mensagens: a explicação e, sozinho, o código (fica fácil de copiar)
@@ -90,7 +95,7 @@ export async function tratarMensagemDeLogin(waId: string, texto: string): Promis
   try {
     await sendMessage(waId, msg)
     await sendMessage(waId, code)
-    log.info('código de login enviado', { phone, step: 'app-auth', data: { comPedido: !!comPedido } })
+    log.info('código de login enviado', { phone, step: 'app-auth', data: { comPedido: !!comPedido, pedido: comPedido ? comPedido[1].toUpperCase() : undefined } })
   } catch (err) {
     log.error('erro ao enviar código de login', err, { phone, step: 'app-auth' })
   }

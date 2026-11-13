@@ -13,7 +13,13 @@ interface LogEntry {
   error?: { message: string; stack?: string; code?: string }
 }
 
+// Destino extra das linhas (o banco, para o painel de administração). Registrado no
+// boot por src/index.ts; fica aqui como função para o logger não depender do banco.
+let destinoExtra: ((entry: LogEntry) => void) | null = null
+export function definirDestinoDosLogs(fn: ((entry: LogEntry) => void) | null) { destinoExtra = fn }
+
 function emit(entry: LogEntry) {
+  try { destinoExtra?.(entry) } catch { /* log nunca derruba o bot */ }
   const line = JSON.stringify(entry)
   if (entry.level === 'error' || entry.level === 'warn') {
     process.stderr.write(line + '\n')

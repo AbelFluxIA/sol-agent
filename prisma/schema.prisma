@@ -57,6 +57,7 @@ model Message {
 
   role    String  // "user" | "assistant" | "system"
   content String  @db.Text
+  canal   String? // "whatsapp" | "app" (mensagens antigas: sem canal)
   
   createdAt DateTime @default(now())
 

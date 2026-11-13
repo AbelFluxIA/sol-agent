@@ -1,6 +1,7 @@
 import { log } from './logger'
 
 let activeCount = 0
+export const operacoesAtivas = () => activeCount
 const MAX_WAIT_MS = 5 * 60 * 1000 // 5 minutos
 
 export function trackOperation<T>(label: string, fn: () => Promise<T>): Promise<T> {
