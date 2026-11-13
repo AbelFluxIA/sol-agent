@@ -2,7 +2,7 @@
 // que é dela em todas as tabelas e nos arquivos (fotos, PDFs). Os registros de
 // custo (ApiUsage) ficam sem o telefone, para a contabilidade não quebrar.
 import axios from 'axios'
-import prisma from './database.service'
+import prisma, { esquecerConversa } from './database.service'
 import { config } from '../config'
 import { log } from '../logger'
 import { cancelGuiaReminder } from './guia-reminder.service'
@@ -87,6 +87,7 @@ export async function excluirConta(phone: string): Promise<ResumoExclusao> {
     resumo.roteiros = conv._count.itineraries
     await prisma.apiUsage.updateMany({ where: { OR: [{ phone }, { conversationId: conv.id }] }, data: { phone: null, conversationId: null } })
     await prisma.conversation.delete({ where: { id: conv.id } })
+    esquecerConversa(phone)
   } else {
     await prisma.apiUsage.updateMany({ where: { phone }, data: { phone: null } })
   }

@@ -27,7 +27,10 @@ setInterval(() => {
   for (const [k, c] of codigos) if (c.expiraEm < agora) codigos.delete(k)
 }, 5 * 60 * 1000).unref()
 
+// No máximo 50 mil pedidos em aberto (cada um vale 15 min): uma inundação de pedidos
+// de login não consegue encher a memória. Devolve '' quando o teto é atingido.
 export function criarPedido(): string {
+  if (pedidos.size >= 50_000) return ''
   let id = ''
   do { id = Array.from({ length: 6 }, () => LETRAS[Math.floor(Math.random() * LETRAS.length)]).join('') } while (pedidos.has(id))
   pedidos.set(id, { criadoEm: Date.now() })

@@ -18,6 +18,23 @@ const prisma = new PrismaClient({
   datasources: { db: { url: urlDoBanco() } },
 })
 
+// Id da conversa de um telefone, guardado por 2 minutos em memória.
+// O banco fica longe do servidor (cada consulta custa ~80 ms só de viagem) e quase toda
+// tela começava buscando a conversa só para pegar o id: lista de roteiros, roteiro,
+// histórico da conversa (que o app consulta a cada 5 s). Com isso, essas telas fazem
+// 1 consulta em vez de 2. Só leitura usa este atalho; gravação continua conferindo no banco.
+const idsDeConversa = new Map<string, { id: string; em: number }>()
+export async function conversaPorTelefone(phone: string): Promise<{ id: string } | null> {
+  const guardado = idsDeConversa.get(phone)
+  if (guardado && Date.now() - guardado.em < 120_000) return { id: guardado.id }
+  const c = await prisma.conversation.findUnique({ where: { phone }, select: { id: true } })
+  if (!c) { idsDeConversa.delete(phone); return null }
+  if (idsDeConversa.size > 20000) idsDeConversa.clear()
+  idsDeConversa.set(phone, { id: c.id, em: Date.now() })
+  return c
+}
+export function esquecerConversa(phone: string): void { idsDeConversa.delete(phone) }
+
 // Gera código de 6 chars alfanumérico sem caracteres ambíguos
 export function generateReferralCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -163,7 +180,7 @@ export async function saveMessage(
 
 // Mensagens que a pessoa mandou hoje (dia de Brasília), somando app e WhatsApp
 export async function contarMensagensDeHoje(phone: string): Promise<number> {
-  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  const conversation = await conversaPorTelefone(phone)
   if (!conversation) return 0
   const hoje = new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' })
   const inicio = new Date(`${hoje}T00:00:00-03:00`)
@@ -173,7 +190,7 @@ export async function contarMensagensDeHoje(phone: string): Promise<number> {
 // Busca as últimas N mensagens (para o contexto do LLM)
 // Padrão: 20 mensagens — suficiente para contexto sem gastar tokens demais
 export async function getRecentMessages(phone: string, limit = 20) {
-  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  const conversation = await conversaPorTelefone(phone)
   if (!conversation) return []
 
   const messages = await prisma.message.findMany({
@@ -240,7 +257,7 @@ export async function getTripHistory(phone: string, limit = 5) {
 
 // Viagens com roteiro já gerado, para a lista do app (mais recente primeiro)
 export async function listItineraries(phone: string, limit = 30) {
-  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  const conversation = await conversaPorTelefone(phone)
   if (!conversation) return []
 
   return prisma.itinerary.findMany({
@@ -256,7 +273,7 @@ export async function listItineraries(phone: string, limit = 30) {
 
 // Um roteiro específico, só se for desta pessoa
 export async function getItineraryForPhone(phone: string, id: string) {
-  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  const conversation = await conversaPorTelefone(phone)
   if (!conversation) return null
   return prisma.itinerary.findFirst({ where: { id, conversationId: conversation.id } })
 }
@@ -316,7 +333,7 @@ export async function resetConversation(phone: string): Promise<void> {
 }
 
 export async function getLatestItinerary(phone: string) {
-  const conversation = await prisma.conversation.findUnique({ where: { phone } })
+  const conversation = await conversaPorTelefone(phone)
   if (!conversation) return null
 
   return prisma.itinerary.findFirst({
@@ -417,7 +434,7 @@ export async function getActiveCompanions(): Promise<{ phone: string; name: stri
 
 // Retorna o timestamp da última mensagem do usuário (para checar inatividade)
 export async function getLastUserMessageAt(phone: string): Promise<Date | null> {
-  const conv = await prisma.conversation.findUnique({ where: { phone } })
+  const conv = await conversaPorTelefone(phone)
   if (!conv) return null
   const msg = await prisma.message.findFirst({
     where: { conversationId: conv.id, role: 'user' },
@@ -447,7 +464,7 @@ export async function getAccountStats(phone: string) {
 
 // Último roteiro com PDF pronto (ignora os "pending" sem texto)
 export async function getLatestReadyItinerary(phone: string) {
-  const conversation = await prisma.conversation.findUnique({ where: { phone }, select: { id: true } })
+  const conversation = await conversaPorTelefone(phone)
   if (!conversation) return null
   return prisma.itinerary.findFirst({
     where: { conversationId: conversation.id, pdfUrl: { not: null } },

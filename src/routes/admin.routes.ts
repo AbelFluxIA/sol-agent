@@ -14,6 +14,7 @@ import { config } from '../config'
 import { estadoDosLogs, resumoDasRotas, atrasoDoProcesso, iniciadoEm, ultimoWebhook } from '../services/logs.service'
 import { operacoesAtivas } from '../shutdown'
 import { filaDeRoteiros } from '../services/fila.service'
+import { arquivosAgora } from '../middleware/limites'
 
 const router = Router()
 const A = '/api/app/admin'
@@ -125,7 +126,7 @@ router.get(`${A}/saude`, adminAppAuth, async (req: Request, res: Response) => {
       banco: { pingMs, bytes: tamanho[0].bytes, maxConexoes: tamanho[0].max_conexoes, conexoes, tabelas },
       processo: {
         iniciadoEm: iniciadoEm.toISOString(), noArSegundos: Math.round(process.uptime()), memoriaMb: Math.round(mem.rss / 1048576), heapMb: Math.round(mem.heapUsed / 1048576),
-        atraso: atrasoDoProcesso(), node: process.version, versao: versaoDoBot(), operacoesEmAndamento: operacoesAtivas(), filaDeRoteiros: filaDeRoteiros.estado(),
+        atraso: atrasoDoProcesso(), node: process.version, versao: versaoDoBot(), operacoesEmAndamento: operacoesAtivas(), filaDeRoteiros: filaDeRoteiros.estado(), arquivosEmAndamento: arquivosAgora(),
       },
       servidor: { cpus: os.cpus().length, carga: os.loadavg().map(n => +n.toFixed(2)), memoriaTotalMb: Math.round(os.totalmem() / 1048576), memoriaLivreMb: Math.round(os.freemem() / 1048576), disco },
       whatsapp: { ultimoWebhook: ultimoWebhook()?.toISOString() ?? null, ultimaMensagem: ultimaMsg[0]?.ts ?? null, assinaturaConferida: !!config.meta.appSecret },

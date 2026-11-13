@@ -17,7 +17,7 @@ import {
   TIPOS_CONSENTIMENTO, type TipoConsentimento,
 } from '../services/presenca.service'
 import { log } from '../logger'
-import { excedeu, limitar, limiteGeral, podeHoje, segredoConfere } from '../middleware/limites'
+import { excedeu, limitar, limiteGeral, limiteDeArquivos, podeHoje, segredoConfere } from '../middleware/limites'
 import { excluirConta } from '../services/conta.service'
 import { criarCompra, gerarPix, gerarCheckout, lerPagamento, conferirNaAbacate, precoDoRoteiro, precoUnitario, type TipoCompra } from '../services/pagamento.service'
 import { confirmarPagamento } from '../services/pagamento-entrega.service'
@@ -83,6 +83,7 @@ export function clientAuthMiddleware(req: Request, res: Response, next: NextFunc
 router.post('/api/app/auth/pedido', limitar('pedido-ip', 60, 600_000), (_req: Request, res: Response) => {
   if (!config.whatsappNumber) { res.status(503).json({ error: 'Número da Sol não configurado' }); return }
   const pedido = criarPedido()
+  if (!pedido) { log.warn('login: pedidos demais em aberto (possível ataque)', { step: 'app-auth' }); res.status(503).json({ error: 'Muitos pedidos agora. Tente de novo em um minuto.' }); return }
   log.info('login: pedido criado no app', { step: 'app-auth', data: { pedido } })
   res.json({ pedido, whatsapp: config.whatsappNumber, texto: textoDoPedido(pedido) })
 })
@@ -173,24 +174,22 @@ router.post('/api/app/erro-cliente', limitar('erro-cliente', 20, 3600_000), (req
 router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
   try {
-    const [conv, stats, itinerary, cota, cadastro, aceites] = await Promise.all([
+    // Tudo ao mesmo tempo (o mural ia depois, em fila: uma viagem a mais até o banco)
+    const supabaseUrl = process.env.SUPABASE_URL!
+    const serviceKey = process.env.SUPABASE_SERVICE_KEY!
+    const [conv, stats, itinerary, cota, cadastro, aceites, murals] = await Promise.all([
       getOrCreateConversation(phone),
       getAccountStats(phone),
       getLatestItinerary(phone),
       roteirosDaSemana(phone),
       lerCadastro(phone),
       consentimentos(phone),
+      // Mural via Supabase REST; se falhar, o perfil sai sem o mural (como antes)
+      fetch(
+        `${supabaseUrl}/rest/v1/photo_murals?phone=eq.${encodeURIComponent(phone)}&order=created_at.desc&limit=1`,
+        { headers: { Authorization: `Bearer ${serviceKey}`, apikey: serviceKey }, signal: AbortSignal.timeout(8000) }
+      ).then(async (r): Promise<any[]> => { const j = r.ok ? await r.json() : []; return Array.isArray(j) ? j : [] }).catch((): any[] => []),
     ])
-
-    // Busca mural via Supabase REST
-    const supabaseUrl = process.env.SUPABASE_URL!
-    const serviceKey = process.env.SUPABASE_SERVICE_KEY!
-    const muralRes = await fetch(
-      `${supabaseUrl}/rest/v1/photo_murals?phone=eq.${encodeURIComponent(phone)}&order=created_at.desc&limit=1`,
-      { headers: { Authorization: `Bearer ${serviceKey}`, apikey: serviceKey } }
-    )
-    const muralsRaw = muralRes.ok ? await muralRes.json() : []
-    const murals: any[] = Array.isArray(muralsRaw) ? muralsRaw : []
 
     res.json({
       name: conv.name,
@@ -310,6 +309,7 @@ router.post('/api/app/chat', clientAuthMiddleware, async (req: Request, res: Res
 router.post(
   '/api/app/chat/audio',
   clientAuthMiddleware,
+  limiteDeArquivos(),
   express.raw({ type: ['audio/*', 'video/webm', 'video/mp4', 'application/octet-stream'], limit: '15mb' }),
   async (req: Request, res: Response) => {
     const phone = (req as any).clientPhone as string
@@ -334,6 +334,7 @@ router.post(
 router.post(
   '/api/app/perfil/foto',
   clientAuthMiddleware,
+  limiteDeArquivos(),
   express.raw({ type: 'image/*', limit: '10mb' }),
   async (req: Request, res: Response) => {
     const phone = (req as any).clientPhone as string
@@ -356,6 +357,7 @@ router.post(
 router.post(
   '/api/app/chat/foto',
   clientAuthMiddleware,
+  limiteDeArquivos(),
   express.raw({ type: 'image/*', limit: '15mb' }),
   async (req: Request, res: Response) => {
     const phone = (req as any).clientPhone as string
@@ -491,6 +493,7 @@ router.post('/api/app/traduzir', clientAuthMiddleware, async (req: Request, res:
 router.post(
   '/api/app/transcrever',
   clientAuthMiddleware,
+  limiteDeArquivos(),
   express.raw({ type: ['audio/*', 'video/webm', 'video/mp4', 'application/octet-stream'], limit: '15mb' }),
   async (req: Request, res: Response) => {
     const phone = (req as any).clientPhone as string

@@ -48,6 +48,29 @@ export function limiteGeral(porSessao: number, porIp: number, janelaMs: number) 
   }
 }
 
+// Arquivos grandes ao mesmo tempo (foto de até 10–15 MB, áudio de até 15 MB): cada um
+// fica inteiro na memória enquanto é tratado. No teste de estresse de 13/11, 30 áudios
+// de 12 MB juntos levaram o processo a 1,2 GB. Acima do teto, o pedido novo recebe
+// "tente de novo em instantes" ANTES de o arquivo ser lido, e a memória fica protegida.
+let arquivosEmAndamento = 0
+export const arquivosAgora = () => arquivosEmAndamento
+export function limiteDeArquivos(maximo = Math.max(2, Number(process.env.ARQUIVOS_SIMULTANEOS) || 12)) {
+  return (_req: Request, res: Response, next: NextFunction) => {
+    if (arquivosEmAndamento >= maximo) {
+      log.warn('muitos arquivos ao mesmo tempo: pedido adiado', { step: 'limites', data: { emAndamento: arquivosEmAndamento, maximo } })
+      res.setHeader('Retry-After', '5')
+      res.status(503).json({ error: 'Muita gente enviando arquivo agora. Tente de novo em alguns segundos.' })
+      return
+    }
+    arquivosEmAndamento++
+    let contou = false
+    const soltar = () => { if (!contou) { contou = true; arquivosEmAndamento-- } }
+    res.on('finish', soltar)
+    res.on('close', soltar)
+    next()
+  }
+}
+
 // ─── Contador por dia (UTC) e por telefone ──────────────────────────────────
 const diarios = new Map<string, { dia: string; n: number }>()
 

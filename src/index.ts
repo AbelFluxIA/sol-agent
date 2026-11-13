@@ -133,9 +133,14 @@ async function bootstrap() {
 
     // HOST: escuta só nesse endereço (ex.: a rede interna do Docker, atrás do Traefik)
     const host = process.env.HOST || '::'
-    app.listen(config.port, host, () => {
+    const servidor = app.listen(config.port, host, () => {
       process.stdout.write(`\n☀️  Sol Agent rodando!\n   → Local: http://localhost:${config.port}\n   → Health: http://localhost:${config.port}/health\n   → Webhook WhatsApp: POST /webhook/whatsapp\n   → Webhook Pagamento: POST /webhook/payment\n   → Webhook Companion: POST /webhook/payment-companion\n   → Logs: GET /internal/logs\n\n`)
     })
+    // Conexões que abrem e não terminam o pedido (cliente lento ou ataque): o padrão do Node
+    // segura cada uma por 5 minutos. 2 minutos bastam até para um áudio grande em internet ruim.
+    servidor.requestTimeout = 120_000
+    servidor.headersTimeout = 30_000
+    servidor.keepAliveTimeout = 65_000
   } catch (error) {
     log.error('falha ao iniciar servidor', error, { step: 'bootstrap' })
     process.exit(1)

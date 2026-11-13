@@ -5,7 +5,7 @@
 // identificam o viajante. Tabelas: sol_presenca, sol_consentimentos, sol_cadastro
 // (RLS ligado, só o servidor acessa).
 
-import prisma from './database.service'
+import prisma, { conversaPorTelefone } from './database.service'
 
 export type TipoConsentimento = 'termos' | 'sos' | 'localizacao_viagem'
 export const TIPOS_CONSENTIMENTO: TipoConsentimento[] = ['termos', 'sos', 'localizacao_viagem']
@@ -118,7 +118,7 @@ export async function roteirosDaSemana(phone: string): Promise<{ usados: number;
   const diasDesdeSegunda = (agora.getUTCDay() + 6) % 7
   const inicio = new Date(Date.UTC(agora.getUTCFullYear(), agora.getUTCMonth(), agora.getUTCDate() - diasDesdeSegunda))
   const renova = new Date(inicio.getTime() + 7 * 86400000)
-  const conv = await prisma.conversation.findUnique({ where: { phone }, select: { id: true } })
+  const conv = await conversaPorTelefone(phone)
   const usados = conv
     ? await prisma.itinerary.count({ where: { conversationId: conv.id, rawItinerary: { not: null }, createdAt: { gte: inicio } } })
     : 0
