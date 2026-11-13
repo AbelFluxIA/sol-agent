@@ -17,7 +17,7 @@ import {
   TIPOS_CONSENTIMENTO, type TipoConsentimento,
 } from '../services/presenca.service'
 import { log } from '../logger'
-import { excedeu, limitar, podeHoje, segredoConfere } from '../middleware/limites'
+import { excedeu, limitar, limiteGeral, podeHoje, segredoConfere } from '../middleware/limites'
 import { excluirConta } from '../services/conta.service'
 import { criarCompra, gerarPix, gerarCheckout, lerPagamento, conferirNaAbacate, precoDoRoteiro, precoUnitario, type TipoCompra } from '../services/pagamento.service'
 import { confirmarPagamento } from '../services/pagamento-entrega.service'
@@ -27,8 +27,8 @@ import { salvarFotoPerfil } from '../services/perfil-foto.service'
 
 const router = Router()
 
-// Teto geral por IP (atrás do Traefik): 300 pedidos por minuto
-router.use('/api/app', limitar('api-ip', 300, 60_000))
+// Teto geral: 300 pedidos por minuto por sessão e 3000 por IP (muita gente pode dividir o mesmo IP)
+router.use('/api/app', limiteGeral(300, 3000, 60_000))
 
 const JWT_SECRET = config.jwtSecret
 
@@ -80,7 +80,7 @@ export function clientAuthMiddleware(req: Request, res: Response, next: NextFunc
 // ─── POST /api/app/auth/pedido ──────────────────────────────────────────────
 // Primeiro login: o app abre o WhatsApp com a mensagem pronta para a Sol; ao
 // receber, a Sol responde só com o código (ver login.service).
-router.post('/api/app/auth/pedido', (_req: Request, res: Response) => {
+router.post('/api/app/auth/pedido', limitar('pedido-ip', 60, 600_000), (_req: Request, res: Response) => {
   if (!config.whatsappNumber) { res.status(503).json({ error: 'Número da Sol não configurado' }); return }
   const pedido = criarPedido()
   log.info('login: pedido criado no app', { step: 'app-auth', data: { pedido } })

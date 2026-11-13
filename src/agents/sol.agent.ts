@@ -8,6 +8,7 @@ import { precoDoRoteiro, criarCompra, gerarCheckout, precoUnitario, reais } from
 import { registrarConversao, limparPrazoGuia } from '../services/indicacao.service'
 import { lerCadastro } from '../services/presenca.service'
 import { log } from '../logger'
+import { filaDeRoteiros } from '../services/fila.service'
 import { buildSolSystemPrompt } from '../prompts/sol.prompts'
 import { solTools, GerarRoteirArgs, RoteiroPersonalizadoArgs, BuscarSugestaoArgs } from '../tools/sol.tools'
 
@@ -860,7 +861,14 @@ Veja o histórico completo: ${statsUrl}`
 // Gera e envia o roteiro após pagamento confirmado
 // Chamado pelo webhook do Abacate Pay (no canal em que a pessoa estava por último)
 // ----------------------------------------------------------------
-export async function generateAndSendItinerary(phone: string, forceDays?: number, channel: Canal = canalAtual(phone)): Promise<void> {
+// No máximo ROTEIROS_SIMULTANEOS (padrão 4) roteiros sendo gerados ao mesmo tempo; os outros esperam a vez
+export function generateAndSendItinerary(phone: string, forceDays?: number, channel: Canal = canalAtual(phone)): Promise<void> {
+  const fila = filaDeRoteiros.estado()
+  if (fila.ativos >= fila.maximo) log.info('roteiro esperando a vez na fila', { phone, step: 'fila-roteiros', data: fila })
+  return filaDeRoteiros.rodar(() => gerarEEnviarRoteiro(phone, forceDays, channel))
+}
+
+async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined, channel: Canal): Promise<void> {
   const conversation = await getOrCreateConversation(phone)
 
   const {

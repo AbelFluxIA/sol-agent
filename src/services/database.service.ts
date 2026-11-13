@@ -4,8 +4,18 @@ import { log } from '../logger'
 import { canalAtual, type Canal } from './canal.service'
 
 // Singleton do Prisma — uma única conexão para toda a aplicação
+// Conexões com o banco: o padrão do Prisma (3 neste servidor de 1 núcleo) virava fila
+// com 50+ pessoas ao mesmo tempo (teste de carga de 13/11: telas de 3 s com 50 usuários
+// e 16 s com 200, com o processador folgado). DB_CONEXOES ajusta; o banco aceita 60.
+function urlDoBanco(): string | undefined {
+  const url = process.env.DATABASE_URL
+  if (!url || /[?&]connection_limit=/.test(url)) return url
+  const n = Math.min(40, Math.max(3, Number(process.env.DB_CONEXOES) || 12))
+  return `${url}${url.includes('?') ? '&' : '?'}connection_limit=${n}&pool_timeout=20`
+}
 const prisma = new PrismaClient({
   log: process.env.NODE_ENV === 'development' ? ['query', 'error'] : ['error'],
+  datasources: { db: { url: urlDoBanco() } },
 })
 
 // Gera código de 6 chars alfanumérico sem caracteres ambíguos

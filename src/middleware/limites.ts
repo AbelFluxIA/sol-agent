@@ -31,6 +31,23 @@ export function limitar(nome: string, maximo: number, janelaMs: number, porTelef
   }
 }
 
+// Teto geral do app: por SESSÃO (quem está logado) e, bem mais alto, por IP.
+// Antes era só por IP (300/min): em hotel, evento ou operadora que divide o mesmo IP
+// entre muita gente, umas 25 pessoas com o app aberto já eram barradas juntas.
+export function limiteGeral(porSessao: number, porIp: number, janelaMs: number) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const auth = String(req.headers.authorization || '')
+    const sessao = auth.startsWith('Bearer ') && auth.length > 40 ? crypto.createHash('sha1').update(auth).digest('base64').slice(0, 16) : ''
+    const barrado = (sessao && excedeu('api-sessao', sessao, porSessao, janelaMs)) || excedeu('api-ip', String(req.ip || 'ip'), porIp, janelaMs)
+    if (barrado) {
+      log.warn('limite de pedidos atingido', { step: 'limites', data: { nome: sessao ? 'api-sessao/ip' : 'api-ip' } })
+      res.status(429).json({ error: 'Muitas tentativas. Espere um pouco e tente de novo.' })
+      return
+    }
+    next()
+  }
+}
+
 // ─── Contador por dia (UTC) e por telefone ──────────────────────────────────
 const diarios = new Map<string, { dia: string; n: number }>()
 

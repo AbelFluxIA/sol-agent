@@ -32,6 +32,8 @@ export function estimateCostUsd(model: string, inputTokens: number, outputTokens
 }
 
 export async function logApiUsage(params: LogApiUsageParams): Promise<void> {
+  // Teste de carga: as chamadas de IA são simuladas e não entram no painel de custos
+  if (process.env.MODO_CARGA === '1') return
   try {
     const costUsd = estimateCostUsd(params.model, params.inputTokens, params.outputTokens, params.thinkingTokens ?? 0)
     await prisma.apiUsage.create({
