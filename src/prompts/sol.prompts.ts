@@ -338,6 +338,7 @@ Se o perfil mencionar o estilo de orçamento, siga rigorosamente:
 - *Econômico / Econômica*: priorize locais gratuitos ou baratos (praças, praias públicas, mercados municipais, restaurantes populares, transporte público ou a pé). NUNCA sugira restaurantes finos, tours pagos caros ou atividades premium.
 - *Equilibrado / Equilibrada*: mix de gratuito e pago. Restaurantes intermediários com boa avaliação. Atividades pagas com custo-benefício comprovado.
 - *Premium*: priorize experiências exclusivas, restaurantes bem avaliados, translados por app, atividades especiais, hotéis de destaque. Não economize na experiência.
+Equivalências usadas pelo app: "econômico" = Econômico; "melhor custo-benefício" = Equilibrado; "conforto" = acima do Equilibrado (priorize qualidade, comodidade e lugares bem avaliados, sem luxo desnecessário). Ao falar com a pessoa, use a palavra que ela escolheu.
 Se não houver informação de orçamento, assuma Equilibrado.
 
 # REGRA #6: PERSONALIZAÇÃO REAL (OBRIGATÓRIO)
@@ -392,45 +393,43 @@ O perfil do turista DEVE ditar o tipo de atividade dominante na agenda. Cada per
 - NUNCA use travessão (—) no texto. Separe ideias com vírgula, ponto ou frases curtas.
 
 # ESTRUTURA POR DIA
-Para cada parada (pode haver mais de uma por período: repita o período com o novo horário):
+Para cada parada (pode haver mais de uma por período: repita o período com o novo horário), nesta ordem e com estas linhas:
 
 [emoji] *[Período] ([HH:MM]):* *[Nome do Local]*
-🚗 *~X min* do [local anterior ou hotel]
-💬 [Por que esse local para esse perfil específico]
+🚗 *~X min* [de carro | a pé | de ônibus] do [local anterior ou ponto de partida]
+🕒 *Horário:* [horário de funcionamento naquele dia da semana] · *Tempo no local:* ~[duração]
+💰 *Custo:* [Grátis | faixa em reais por pessoa, ex.: R$ 40 a R$ 70 por pessoa]
+💬 [Por que esse local para ESTA pessoa: cite um gosto, o grupo ou o orçamento dela. Nada genérico.]
+☔ *Se chover:* [alternativa coberta e próxima]  (SÓ em paradas ao ar livre)
+💡 *Curiosidade:* [texto breve]  (no máximo 2 por dia)
 [⚠️ Alerta climático ou de segurança se aplicável]
 📍 https://www.google.com/maps/search/?api=1&query=Nome+Do+Local+${destinationQuery}
 
-- O [Período] é SEMPRE uma destas palavras: Manhã, Tarde ou Noite. Refeições e traslados seguem o mesmo formato (ex.: "🌤️ *Tarde (12:30):* *Restaurante X*", "☀️ *Manhã (07:00):* *Traslado para o aeroporto*"). NUNCA use "Almoço", "Jantar", "Café" ou "Traslado" no lugar do período.
-- Cada parada tem UM link 📍 só, o do próprio local.
+Regras da estrutura:
+- O [Período] é SEMPRE uma destas palavras: Manhã, Tarde ou Noite. Refeições e traslados seguem o mesmo formato (ex.: "🌤️ *Tarde (12:30):* *Restaurante X*"). NUNCA use "Almoço", "Jantar", "Café" ou "Traslado" no lugar do período.
+- Cada parada tem UM link 📍 só, o do próprio local, com o NOME OFICIAL do lugar (como aparece no Google Maps).
+- As linhas 🕒 e 💰 são OBRIGATÓRIAS em toda parada que é um lugar (confirme horário e preço no Google Search). Se não achar o preço, escreva uma faixa estimada e diga "estimado".
+- Na PRIMEIRA parada do dia, a linha 🚗 parte do ponto de partida informado. Se não houver ponto de partida, escreva exatamente "🚗 Ponto de partida do dia" e NÃO invente tempo.
 
-# CURIOSIDADES LOCAIS (OBRIGATÓRIO: inclua ao longo do roteiro)
-Para cada dia, adicione 1-2 curiosidades relevantes sobre os locais visitados, integradas naturalmente ao roteiro:
-- Curiosidades históricas do local (fundação, evento marcante, personagem histórico)
-- Fatos interessantes da cidade ou bairro
-- Dicas culturais únicas (costume local, comida típica do lugar, expressão regional)
-- Recordes ou fatos surpreendentes (maior, mais antigo, único no mundo, etc.)
-- Conexões inesperadas (lugar que apareceu em filme, livro famoso, visitado por celebridade)
-Formato: coloque após a descrição do local, iniciando com 💡 *Curiosidade:* [texto breve]
+# REGRAS DE CONTEÚDO (OBRIGATÓRIO)
+- NUNCA SUPONHA nada que não foi informado: voo, aeroporto, rodoviária, carro, hotel, bairro, horário. Proibido escrever "assumindo", "supondo", "caso seja", "se for o caso". Use só o que está nos dados do turista.
+- Dia cheio tem de 4 a 6 paradas de verdade, incluindo ALMOÇO e JANTAR em restaurantes reais que combinem com os gostos e o orçamento da pessoa. Meio dia: 2 a 3 paradas.
+- Não encha o roteiro: "compras de lembrancinhas", "tempo livre", "descanso", "check-in" e "check-out" NÃO são paradas. Traslado só entra se o transporte de volta foi informado.
+- Os interesses do pedido mandam: se o primeiro interesse é Negócios, a maior parte das paradas do dia é de negócios (coworkings, hubs, centros de convenções, cafés para trabalhar, eventos do setor), e praia ou passeio turístico entra só no fim do dia. NUNCA force a ligação de um lugar com um interesse (proibido "um toque de negócios", "combina com cultura pela importância..."): se o lugar não é daquele tipo, escolha outro.
+- O roteiro vai até o horário de volta informado. Não termine o dia horas antes sem motivo.
+- Não repita lugares que a pessoa já fez (lista nos dados) e priorize os que ela disse que quer conhecer.
+- Se houver EVENTOS NAS DATAS nos dados, inclua no máximo 2 que combinem com o perfil, como parada normal no dia e horário do evento, com uma linha extra antes do 📍:
+🎫 *Evento:* [nome do evento, data e hora]. Fonte: [endereço da fonte que veio nos dados]
+  Use somente eventos da lista fornecida. NUNCA invente evento.
+- Fale com a pessoa ("você"). Sem termos técnicos: nunca escreva código meteorológico, milímetros de chuva, altura de onda em metros ou coordenadas. Diga "chuva fraca à tarde", "mar calmo", "mar agitado".
 
-# INTRODUÇÃO OBRIGATÓRIA (primeira página do PDF: mínimo 5 parágrafos)
-Antes de qualquer DIA, escreva uma introdução personalizada com os seguintes blocos:
+# INTRODUÇÃO (curta: no máximo 2 parágrafos, até 500 caracteres no total)
+Antes de qualquer DIA:
+Parágrafo 1: cumprimente pelo nome e diga em uma frase o que este roteiro prioriza para ela.
+Parágrafo 2: o tempo nos dias da viagem em palavras simples (ex.: "terça com chuva fraca à tarde") e UMA dica prática do destino.
+Sem assinatura, sem "com carinho", sem despedida longa.
 
-Parágrafo 1: Boas-vindas personalizada:
-Cumprimente o cliente pelo nome, mencione o destino e transmita entusiasmo genuíno. Ex: "Olá, [nome]! Aqui está o seu roteiro para [destino], montado especialmente para você."
-
-Parágrafo 2: Por que esse roteiro:
-Explique o raciocínio por trás das escolhas com base no perfil informado (interesses, grupo, hospedagem). Mencione o tipo de experiência priorizada. Ex: "Como você vai a negócios e ficará no Centro, priorizei locais de alto padrão com logística eficiente: cada deslocamento foi pensado para economizar seu tempo."
-
-Parágrafo 3: Previsão do tempo e impacto no roteiro:
-Descreva as condições climáticas de cada dia e como elas influenciaram as escolhas. Use o formato: [Dia da semana]: [condição] [impacto]. Seja específico e útil.
-
-Parágrafo 4: Dica especial para o destino:
-Uma dica prática e relevante para esse destino e perfil específico (transporte local, costume cultural, melhor horário para alguma atração, etc).
-
-Parágrafo 5: Fechamento:
-Uma frase de encerramento calorosa desejando uma boa viagem, assinada como "Sol".
-
-Somente após esses 5 parágrafos, comece os dias com "DIA 1 - ...":`
+Depois da introdução, comece os dias com "DIA 1 - [dia da semana], [data por extenso]" (sem asteriscos) e, na linha seguinte, "Previsão do tempo: [em palavras simples, sem números de milímetros nem de ondas]".`
 }
 
 export function buildDaysClassifierPrompt(arrivalDate: string, departureDate: string): string {

@@ -28,7 +28,11 @@ import {
   getLatestReadyItinerary,
   shareCodeDoRoteiro,
 } from '../services/database.service'
+import prisma from '../services/database.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
+import { guardarExtras, lerExtras, montarContexto, type Transporte } from '../services/roteiro-contexto.service'
+import { conferirRoteiro } from '../services/verificacao.service'
+import { geocodeDestination } from '../services/weather.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
 import { generateStoryImage, uploadStoryImage } from '../services/story.service'
@@ -610,12 +614,15 @@ export interface PedidoRoteiroApp {
   custos: string         // "econômico", "melhor custo-benefício", "conforto"
   hospedagem?: string
   origem?: string
+  transporte?: Transporte               // como volta: avião, carro, ônibus ou "local" (mora/está na cidade)
+  partida?: { lat: number; lng: number } // posição do celular na hora do pedido (ponto de partida sem hospedagem)
 }
 
 export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp, pago = false): Promise<string> {
   marcarCanal(phone, 'app')
   cancelGuiaReminder(phone)
   const conv = await getOrCreateConversation(phone)
+  guardarExtras(phone, { transporte: p.transporte, partida: p.partida })
   const familia = p.quemVai === 'família'
     ? `família com ${p.adultos ?? 2} ${(p.adultos ?? 2) === 1 ? 'adulto' : 'adultos'}${p.criancas ? ` e ${p.criancas} ${p.criancas === 1 ? 'criança' : 'crianças'} (até 12 anos)` : ''}`
     : p.quemVai
@@ -633,12 +640,14 @@ export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp, pa
     data_chegada: p.chegada,
     data_saida: p.saida,
     horario_chegada: p.horaChegada || '09:00',
-    perfil_do_turista: `Turista de lazer, ${grupo}, foco em ${tipos}, orçamento ${p.custos}`,
+    // O primeiro tipo marcado define o perfil (antes era sempre "turista de lazer", e um pedido de Negócios virava praia)
+    perfil_do_turista: `${/neg[oó]cio/i.test(p.tipos[0] ?? '') ? 'Turista de negócios' : /inova|tech/i.test(p.tipos[0] ?? '') ? 'Turista de inovação' : /gastronom/i.test(p.tipos[0] ?? '') ? 'Turista gastronômico' : /cultur|hist[oó]r/i.test(p.tipos[0] ?? '') ? 'Turista cultural' : /aventura/i.test(p.tipos[0] ?? '') ? 'Turista de aventura' : 'Turista de lazer'}, ${grupo}, interesses deste pedido em ordem de prioridade: ${tipos}, orçamento ${p.custos}`,
     sozinho_ou_acompanhado: grupo,
     nome_turista: conv.name || 'não informado',
     hotel_hospedagem: p.hospedagem || 'não informado',
     horario_volta: p.horaVolta || 'não informado',
     cidade_origem: p.origem || 'não informado',
+    transporte_volta: p.transporte ?? 'nao_informado',
   }, 'app', pago)
 }
 
@@ -692,6 +701,8 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
     horario_volta,
     cidade_origem,
   } = args
+  // Como a pessoa volta. Sem informação fica vazio: o roteiro não supõe avião nem carro.
+  const transporte: Transporte | null = (['aviao', 'carro', 'onibus', 'local'] as const).find(t => t === String(args.transporte_volta ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')) ?? null
 
   // Datas no passado não geram roteiro nem são gravadas: o modelo às vezes reaproveita
   // as datas de uma viagem antiga da conversa (ex.: pediu Curitiba em outubro, voltou em novembro)
@@ -724,6 +735,8 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
     groupType: sozinho_ou_acompanhado,
     phase: 3,
   })
+  // Sempre regrava (inclusive vazio): o transporte de uma viagem antiga não vale para esta
+  await prisma.conversation.update({ where: { phone }, data: { transportMode: transporte } }).catch(() => { /* conversa recém-criada: segue */ })
 
   // Descobre quantos dias de roteiro
   const days = await classifyDays(data_chegada, data_saida, phone)
@@ -909,10 +922,12 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     // Avisa que está gerando
     await responder(phone, channel, buildGeneratingMessage(name, latestIt?.status === 'paid'), 500)
 
-    // Busca clima e maré com base no destino
-    const { weather, marine } = await log.timed(phone, 'weather/marine', () =>
-      getWeatherAndMarine(arrivalDate, departureDate, dest)
-    )
+    // Clima e maré do destino, e o que a Sol sabe da pessoa e da cidade nas datas (ao mesmo tempo)
+    const [{ weather, marine }, contexto] = await Promise.all([
+      log.timed(phone, 'weather/marine', () => getWeatherAndMarine(arrivalDate, departureDate, dest)),
+      montarContexto(phone, dest, arrivalDate, departureDate, latestIt?.id),
+    ])
+    const hospedagem = touristProfile?.match(/\|\s*hospedagem:\s*(.+)$/)?.[1]?.trim()
 
     // Descobre número de dias (ou usa o forçado)
     const days = forceDays || (await log.timed(phone, 'classify-days', () =>
@@ -920,7 +935,7 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     ))
 
     // Gera o texto do roteiro
-    const itineraryText = await log.timed(phone, 'gemini-itinerary', () =>
+    const textoBruto = await log.timed(phone, 'gemini-itinerary', () =>
       generateItineraryText({
         name,
         destination: dest,
@@ -937,8 +952,20 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
         transportMode: transportMode || undefined,
         phone,
         itineraryId: latestIt?.id,
+        hospedagem,
+        contexto,
       })
     )
+
+    // Confere cada parada no Google Maps (existe? abre nesse dia e horário? é bem avaliada?),
+    // troca o que reprovar e calcula o deslocamento real. Se o Google falhar, segue o texto como veio.
+    const datasDaViagem: string[] = []
+    for (let d = new Date(`${arrivalDate}T12:00:00Z`); d <= new Date(`${departureDate}T12:00:00Z`) && datasDaViagem.length < 16; d = new Date(d.getTime() + 86400000)) datasDaViagem.push(d.toISOString().slice(0, 10))
+    const centro = await geocodeDestination(dest).then(c => ({ lat: c.lat, lng: c.lon })).catch(() => null)
+    const conferido = await log.timed(phone, 'conferencia-google', () =>
+      conferirRoteiro(textoBruto, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem })
+    )
+    const itineraryText = conferido.texto
 
     // Salva texto no banco para a Sol Guia usar como contexto
     if (latestIt) {

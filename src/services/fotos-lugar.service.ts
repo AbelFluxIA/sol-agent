@@ -46,7 +46,7 @@ function podeCobrar(phone: string): boolean {
 
 const cabecalhos = (campos: string) => ({ 'X-Goog-Api-Key': config.googlePlaces.apiKey, 'X-Goog-FieldMask': campos })
 
-async function placeId(texto: string, perto: { lat: number; lng: number } | null): Promise<string | null> {
+export async function placeId(texto: string, perto: { lat: number; lng: number } | null): Promise<string | null> {
   const consulta = normalizar(texto)
   const linhas = await prisma.$queryRaw<{ place_id: string | null }[]>`
     select place_id from public.sol_lugar_google where consulta = ${consulta}`

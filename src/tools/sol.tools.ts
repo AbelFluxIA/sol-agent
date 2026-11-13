@@ -60,6 +60,11 @@ NUNCA escreva apenas "viajante econômico" sem especificar o tipo de experiênci
             type: 'string',
             description: 'Cidade de onde o cliente vai partir. Ex: "Recife - PE", "São Paulo - SP". Use "não informado" se não foi dito.',
           },
+          transporte_volta: {
+            type: 'string',
+            enum: ['aviao', 'carro', 'onibus', 'local', 'nao_informado'],
+            description: 'Como o cliente volta no último dia: "aviao", "carro", "onibus" ou "local" (mora ou já está na cidade, sem viagem de volta). Use "nao_informado" se ele não disse. NUNCA suponha avião. Se for natural, pergunte junto com o horário de volta.',
+          },
         },
         required: [
           'destino',
@@ -162,6 +167,7 @@ export interface GerarRoteirArgs {
   hotel_hospedagem: string
   horario_volta: string
   cidade_origem: string
+  transporte_volta?: string
 }
 
 export interface RoteiroPersonalizadoArgs {

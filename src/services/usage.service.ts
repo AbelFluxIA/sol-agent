@@ -17,7 +17,7 @@ interface LogApiUsageParams {
   itineraryId?: string
   provider: 'openai' | 'google'
   model: string
-  callType: 'chat' | 'itinerary' | 'grounded_search' | 'classify_days' | 'track_visited'
+  callType: 'chat' | 'itinerary' | 'grounded_search' | 'classify_days' | 'track_visited' | 'eventos' | 'reparo_roteiro' | 'troca_atividade' | string
   inputTokens: number
   outputTokens: number
   thinkingTokens?: number

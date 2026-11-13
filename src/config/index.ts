@@ -58,6 +58,9 @@ export const config = {
     apiKey: process.env.GOOGLE_PLACES_KEY || '',
     fotosPorDia: Number(process.env.GOOGLE_PLACES_FOTOS_DIA ?? 150),
     fotosPorPessoaDia: Number(process.env.GOOGLE_PLACES_FOTOS_PESSOA_DIA ?? 60),
+    // Conferência dos lugares do roteiro e "aberto agora" no app (cada consulta é cobrada pelo Google)
+    conferenciasPorDia: Number(process.env.GOOGLE_PLACES_CONFERENCIAS_DIA ?? 800),
+    infoPorPessoaDia: Number(process.env.GOOGLE_PLACES_INFO_PESSOA_DIA ?? 80),
   },
 
   supabase: {

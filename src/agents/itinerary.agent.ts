@@ -4,6 +4,7 @@ import { config } from '../config'
 import { log } from '../logger'
 import { buildItinerarySystemPrompt, buildDaysClassifierPrompt } from '../prompts/sol.prompts'
 import { WeatherData, MarineData, VALID_DAYS, ValidDays } from '../types'
+import type { ContextoRoteiro } from '../services/roteiro-contexto.service'
 import { getDaysOfWeek } from '../services/weather.service'
 import { logApiUsage } from '../services/usage.service'
 
@@ -30,6 +31,8 @@ interface GenerateItineraryParams {
   transportMode?: string
   phone?: string
   itineraryId?: string
+  hospedagem?: string
+  contexto?: ContextoRoteiro
 }
 
 // Datas no formato AAAA-MM-DD (como vêm do app): conta na mão, sem chamar a IA.
@@ -94,26 +97,32 @@ export async function generateItineraryText(params: GenerateItineraryParams): Pr
     transportMode,
     phone,
     itineraryId,
+    hospedagem,
+    contexto,
   } = params
 
   const daysOfWeek = getDaysOfWeek(arrivalDate, departureDate)
   const hasMonday = daysOfWeek.includes('Segunda')
 
-  // Instrução para o último dia baseada no meio de transporte e horário
+  // Instrução para o último dia, conforme o transporte de volta INFORMADO.
+  // Sem transporte informado não se supõe nada (antes o padrão era avião: o roteiro
+  // inventava "traslado ao aeroporto, seu voo é às 22h" e cortava a noite inteira).
   function buildLastDayInstruction(): string {
-    if (!departureTime || departureTime === 'não informado') return ''
+    if (!departureTime || departureTime === 'não informado') return 'ÚLTIMO DIA: horário de volta não informado. Planeje o dia normalmente até o jantar e NÃO inclua traslado, aeroporto ou rodoviária.'
     const [h] = departureTime.split(':').map(Number)
-    const isFlying = !transportMode || transportMode === 'aviao'
-    // Avião: 5h de antecedência (2h no aeroporto + 3h para organizar e deslocar)
-    // Carro: 2.5h de antecedência (organizar malas + saída)
-    const bufferH = isFlying ? 5 : 3
-    const cutoffH = h - bufferH
-    const transport = isFlying ? 'voo' : 'viagem de carro'
-    const destination = isFlying ? 'aeroporto' : 'saída'
-
-    if (cutoffH <= 7) return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: não inclua atividades — apenas check-out e traslado ao ${destination}.`
-    if (cutoffH <= 12) return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: UMA atividade pela manhã (termine até ${cutoffH}h), depois traslado ao ${destination}.`
-    return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: manhã e UMA atividade à tarde (termine até ${cutoffH}h), depois traslado ao ${destination}.`
+    if (transportMode === 'aviao' || transportMode === 'onibus') {
+      // Avião: 5h de antecedência (2h no aeroporto + 3h para organizar e deslocar). Ônibus: 2h.
+      const bufferH = transportMode === 'aviao' ? 5 : 2
+      const cutoffH = h - bufferH
+      const transport = transportMode === 'aviao' ? 'voo' : 'ônibus'
+      const destination = transportMode === 'aviao' ? 'aeroporto' : 'rodoviária'
+      if (cutoffH <= 7) return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: não inclua atividades — apenas check-out e traslado ao ${destination}.`
+      if (cutoffH <= 12) return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: UMA atividade pela manhã (termine até ${cutoffH}h), depois traslado ao ${destination}.`
+      return `⚠️ ÚLTIMO DIA — ${transport} às ${departureTime}: atividades até ${cutoffH}h (inclua o almoço e, se der tempo, mais uma parada), depois traslado ao ${destination}.`
+    }
+    if (transportMode === 'carro') return `⚠️ ÚLTIMO DIA — a pessoa volta de carro e quer pegar a estrada às ${departureTime}: planeje paradas até ${Math.max(0, h - 1)}h. NÃO inclua aeroporto nem rodoviária. A última parada pode ser a refeição antes da estrada.`
+    if (transportMode === 'local') return `⚠️ ÚLTIMO DIA — a pessoa mora ou já está na cidade e o passeio termina às ${departureTime}: planeje paradas até esse horário. NÃO inclua traslado, aeroporto nem rodoviária.`
+    return `⚠️ ÚLTIMO DIA — o passeio termina às ${departureTime}. O meio de transporte NÃO foi informado: planeje paradas até cerca de ${Math.max(0, h - 1)}h (com jantar, se o horário permitir) e NÃO inclua traslado, aeroporto, voo ou rodoviária.`
   }
   const lastDayInstruction = buildLastDayInstruction()
 
@@ -144,6 +153,18 @@ export async function generateItineraryText(params: GenerateItineraryParams): Pr
     ? `DADOS DO CLIMA POR DIA (chuva em mm, código meteorológico):\n${JSON.stringify(weather.daily, null, 2)}`
     : 'Dados de clima: indisponíveis no momento — use Google Search para verificar a previsão do tempo.'
 
+  // O que a Sol sabe da pessoa (cadastro, roteiros anteriores, avaliações) e da cidade nas datas
+  const lista = (titulo: string, itens: string[] | undefined) => (itens && itens.length ? `\n- ${titulo}: ${itens.join('; ')}` : '')
+  const blocoPessoa =
+    lista('Gostos marcados no cadastro (secundários: os interesses DESTE pedido, no Perfil, têm prioridade)', contexto?.gostos) +
+    lista('Lugares que disse que quer conhecer (priorize se ficarem neste destino)', contexto?.lugaresDesejados) +
+    lista('Lugares que JÁ FEZ neste destino em roteiros anteriores (NÃO repita)', contexto?.jaFeitos) +
+    lista('Atividades que avaliou como GOSTEI (busque parecidas)', contexto?.gostou) +
+    lista('Atividades que avaliou como NÃO GOSTEI (evite parecidas)', contexto?.naoGostou)
+  const eventosSection = contexto?.eventos?.length
+    ? `EVENTOS NAS DATAS (achados por busca, com fonte; inclua no máximo 2 que combinem com o perfil):\n${contexto.eventos.map(e => `- ${e.data}${e.hora ? ` ${e.hora}` : ''}: ${e.titulo}${e.local ? `, em ${e.local}` : ''}${e.tipo ? ` [${e.tipo}]` : ''}${e.preco ? ` (${e.preco})` : ''}. Fonte: ${e.fonte}`).join('\n')}`
+    : 'EVENTOS NAS DATAS: nenhum evento confirmado encontrado. NÃO invente eventos.'
+
   const userPrompt = `
 ${buildItinerarySystemPrompt(destination)}
 
@@ -158,9 +179,12 @@ ${originCity ? `- Cidade de origem: ${originCity}` : ''}
 - Dias da semana: ${daysOfWeek.join(', ')}
 - Perfil: ${touristProfile}
 - Grupo: ${groupType}
-${transportMode ? `- Transporte de volta: ${transportMode === 'aviao' ? 'avião (reservar 5h antes da partida)' : 'carro (reservar 3h antes da partida)'}` : ''}
+- Transporte de volta: ${transportMode === 'aviao' ? 'avião' : transportMode === 'carro' ? 'carro próprio ou alugado' : transportMode === 'onibus' ? 'ônibus' : transportMode === 'local' ? 'não se aplica (mora ou já está na cidade)' : 'NÃO INFORMADO (não suponha)'}
+- Horário de volta no último dia: ${departureTime && departureTime !== 'não informado' ? departureTime : 'não informado'}
+- Ponto de partida de cada dia: ${hospedagem && hospedagem !== 'não informado' ? `hospedagem: ${hospedagem}` : contexto?.partida ? contexto.partida : 'NÃO INFORMADO (na primeira parada escreva "🚗 Ponto de partida do dia")'}${blocoPessoa}
 ${forceDays ? `- Dias de roteiro: ${forceDays}` : ''}
 ${hasMonday ? '⚠️ SEGUNDA-FEIRA no roteiro — use apenas locais que abrem na segunda.' : ''}
+${/turista de neg[oó]cios/i.test(touristProfile) ? '⚠️ PERFIL DE NEGÓCIOS: em cada dia cheio, pelo menos METADE das paradas diurnas são de negócios de verdade (coworking, hub de inovação, centro de convenções, entidade empresarial, café bom para trabalhar ou reunião, evento do setor). Passeio turístico só no fim da tarde ou à noite.' : ''}
 ${lastDayInstruction}
 ${day1StartInstruction}
 
@@ -168,13 +192,17 @@ ${marineSection}
 
 ${weatherSection}
 
+${eventosSection}
+
 INSTRUÇÕES OBRIGATÓRIAS:
 1. Use Google Search para confirmar que cada local está ABERTO nas datas/horários indicados
 2. Use Google Search para verificar a SEGURANÇA de cada área sugerida
-3. O primeiro destino de cada dia deve partir da hospedagem do cliente (se informada)
+3. O primeiro destino de cada dia parte do ponto de partida informado acima (hospedagem ou posição). Sem ponto de partida, não invente um
 4. Cada próximo destino deve ser geograficamente próximo ao anterior — informe o tempo real de deslocamento
 5. Analise os dados de clima acima e adapte o roteiro dia a dia — mencione as condições
 6. Para praias/natureza, indique o melhor horário com base nas ondas (se disponível) ou clima
+7. Toda parada que é um lugar tem as linhas 🕒 (horário e tempo no local) e 💰 (custo), e paradas ao ar livre têm ☔ (se chover)
+8. Inclua almoço e jantar em restaurantes reais nos dias cheios
 
 Gere o roteiro completo formatado para WhatsApp.
   `.trim()

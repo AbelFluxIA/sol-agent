@@ -12,6 +12,8 @@ import { getAlbum, estadoDoAlbum, apagarFotoDoAlbum, MENSAGEM_BLOQUEIO } from '.
 import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigoDetalhado, telefoneDoPedido, pedidoExiste } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
 import { fotoDoLocal, fotosLigadas } from '../services/fotos-lugar.service'
+import { trocarAtividade, avaliarAtividade, avaliacoesDoRoteiro, MOTIVOS_DE_TROCA } from '../services/troca.service'
+import { lerLugar, podeConsultarGoogle } from '../services/verificacao.service'
 import {
   consentimentos, registrarConsentimento, registrarPresenca, lerCadastro, salvarCadastro, roteirosDaSemana,
   TIPOS_CONSENTIMENTO, type TipoConsentimento,
@@ -400,10 +402,83 @@ router.get('/api/app/roteiro', clientAuthMiddleware, async (req: Request, res: R
       arrivalDate: itinerary.arrivalDate,
       departureDate: itinerary.departureDate,
       rawItinerary: itinerary.rawItinerary ?? null,
+      avaliacoes: await avaliacoesDoRoteiro(phone, itinerary.id).catch(() => ({})),
     })
   } catch (err) {
     log.error('erro ao buscar roteiro do app', err, { phone, step: 'app-roteiro' })
     res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+// ─── POST /api/app/roteiro/trocar ────────────────────────────────────────────
+// Troca uma atividade do roteiro por outra (mesmo horário), conferida no Google Maps
+router.post('/api/app/roteiro/trocar', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const b = req.body ?? {}
+  const id = typeof b.id === 'string' ? b.id.slice(0, 40) : ''
+  const dia = Number(b.dia), indice = Number(b.indice)
+  const nome = typeof b.nome === 'string' ? b.nome.slice(0, 200) : ''
+  const motivo = MOTIVOS_DE_TROCA.includes(b.motivo) ? b.motivo : 'outro'
+  if (!id || !Number.isInteger(dia) || dia < 0 || dia > 30 || !Number.isInteger(indice) || indice < 0 || indice > 40) { res.status(400).json({ error: 'Informe a atividade' }); return }
+  // Trocar atividade é recurso da Guia Sol (RA-ROT-07)
+  if (!(await getOrCreateConversation(phone)).hasCompanion) { res.status(403).json({ error: 'Trocar atividade é um recurso da Guia Sol.' }); return }
+  if (excedeu('troca-roteiro', phone, 3, 60_000) || !podeHoje('troca-roteiro', `${phone}:${id}`, 12)) { res.status(429).json({ error: 'Muitas trocas neste roteiro por hoje. Tente amanhã ou peça pela conversa com a Sol.' }); return }
+  try {
+    const r = await trocarAtividade(phone, id, dia, indice, nome, motivo)
+    if ('erro' in r) { res.status(r.status).json({ error: r.erro }); return }
+    res.json({ ok: true, rawItinerary: r.texto, nova: r.nova })
+  } catch (err) {
+    log.error('erro ao trocar atividade', err, { phone, step: 'troca-atividade' })
+    res.status(500).json({ error: 'Não consegui trocar agora. Tente de novo.' })
+  }
+})
+
+// ─── POST /api/app/roteiro/avaliar ───────────────────────────────────────────
+// "Gostei / não gostei" de uma atividade (nota 1, -1 ou 0 para tirar). Entra nos próximos roteiros.
+router.post('/api/app/roteiro/avaliar', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const b = req.body ?? {}
+  const id = typeof b.id === 'string' && b.id ? b.id.slice(0, 40) : null
+  const atividade = typeof b.atividade === 'string' ? b.atividade.trim() : ''
+  const nota = Number(b.nota)
+  if (atividade.length < 2 || ![1, -1, 0].includes(nota)) { res.status(400).json({ error: 'Informe a atividade e a nota' }); return }
+  if (excedeu('avaliar', phone, 60, 600_000)) { res.status(429).json({ error: 'Espere um pouco.' }); return }
+  try {
+    // Só avalia roteiro que é da própria pessoa
+    if (id && !(await getItineraryForPhone(phone, id))) { res.status(404).json({ error: 'Roteiro não encontrado' }); return }
+    await avaliarAtividade(phone, id, atividade, nota as 1 | -1 | 0)
+    res.json({ ok: true })
+  } catch (err) {
+    log.error('erro ao avaliar atividade', err, { phone, step: 'avaliar' })
+    res.status(500).json({ error: 'Não consegui salvar agora' })
+  }
+})
+
+// ─── GET /api/app/local-info ─────────────────────────────────────────────────
+// "Aberto agora", horário de hoje e nota de um local, direto do Google Maps, na hora.
+// Pelas regras do Google esses dados não são guardados: o app pede quando a pessoa abre a atividade.
+router.get('/api/app/local-info', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const local = typeof req.query.local === 'string' ? req.query.local.trim().slice(0, 120) : ''
+  const cidade = typeof req.query.cidade === 'string' ? req.query.cidade.trim().slice(0, 80) : ''
+  if (local.length < 3 || !fotosLigadas() || !podeHoje('local-info', phone, config.googlePlaces.infoPorPessoaDia) || !podeConsultarGoogle()) { res.status(204).end(); return }
+  try {
+    const l = await lerLugar(cidade && !local.toLowerCase().includes(cidade.toLowerCase().split(/\s*-\s*/)[0]) ? `${local}, ${cidade}` : local, null,
+      'id,businessStatus,currentOpeningHours.openNow,currentOpeningHours.weekdayDescriptions,regularOpeningHours.openNow,regularOpeningHours.weekdayDescriptions,rating,userRatingCount,googleMapsUri')
+    if (!l) { res.status(204).end(); return }
+    const hoje = new Date().toLocaleDateString('pt-BR', { weekday: 'long', timeZone: 'America/Sao_Paulo' }).toLowerCase()
+    const linhaDeHoje = (l.horarios ?? []).find(h => h.toLowerCase().startsWith(hoje.split('-')[0])) ?? null
+    res.set('Cache-Control', 'private, no-store').json({
+      fechadoDeVez: l.estado === 'CLOSED_PERMANENTLY' || l.estado === 'CLOSED_TEMPORARILY',
+      abertoAgora: typeof l.abertoAgora === 'boolean' ? l.abertoAgora : null,
+      horarioHoje: linhaDeHoje ? linhaDeHoje.replace(/^[^:]+:\s*/, '') : null,
+      nota: typeof l.nota === 'number' ? l.nota : null,
+      avaliacoes: l.avaliacoes ?? null,
+      mapsUrl: l.mapsUrl ?? null,
+    })
+  } catch (err) {
+    log.warn('informação do local falhou', { phone, step: 'local-info', data: { error: (err as Error).message, status: (err as any)?.response?.status } })
+    res.status(204).end()
   }
 })
 
@@ -462,6 +537,9 @@ router.post('/api/app/roteiros/criar', clientAuthMiddleware, async (req: Request
     custos: ['econômico', 'melhor custo-benefício', 'conforto'].includes(b.custos) ? b.custos : 'melhor custo-benefício',
     hospedagem: typeof b.hospedagem === 'string' && b.hospedagem.trim() ? b.hospedagem.trim().slice(0, 120) : undefined,
     origem: typeof b.origem === 'string' && b.origem.trim() ? b.origem.trim().slice(0, 80) : undefined,
+    transporte: (['aviao', 'carro', 'onibus', 'local'] as const).find(t => t === b.transporte),
+    partida: b.partida && Number.isFinite(Number(b.partida.lat)) && Number.isFinite(Number(b.partida.lng)) && Math.abs(Number(b.partida.lat)) <= 90 && Math.abs(Number(b.partida.lng)) <= 180
+      ? { lat: Number(b.partida.lat), lng: Number(b.partida.lng) } : undefined,
   }
   try {
     const antes = (await listItineraries(phone)).length
@@ -623,7 +701,7 @@ router.post('/api/app/conta/excluir', clientAuthMiddleware, async (req: Request,
 
 // ─── Pagamentos (AbacatePay v2) ──────────────────────────────────────────────
 // Cria a compra e já devolve o Pix (QR Code e copia e cola) para pagar na própria tela.
-const PEDIDO_CAMPOS = ['destino', 'chegada', 'saida', 'horaChegada', 'horaVolta', 'quemVai', 'adultos', 'criancas', 'pet', 'tipos', 'custos', 'hospedagem', 'origem']
+const PEDIDO_CAMPOS = ['destino', 'chegada', 'saida', 'horaChegada', 'horaVolta', 'quemVai', 'adultos', 'criancas', 'pet', 'tipos', 'custos', 'hospedagem', 'origem', 'transporte', 'partida']
 const visao = (p: any) => ({
   ref: p.ref, tipo: p.tipo, dias: p.dias, valorCentavos: p.valor_centavos, status: p.status,
   brCode: p.status === 'pago' ? null : p.br_code, qr: p.status === 'pago' ? null : p.qr_base64,
