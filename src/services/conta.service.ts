@@ -75,6 +75,8 @@ export async function excluirConta(phone: string): Promise<ResumoExclusao> {
   await prisma.$executeRaw`delete from public.sol_consentimentos where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_cadastro where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_creditos_guia where phone = ${phone}`
+  // Pagamentos ficam como registro financeiro, sem os dados do pedido
+  await prisma.$executeRaw`update public.sol_pagamentos set pedido = null, br_code = null, qr_base64 = null where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_resgates_guia where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_indicacoes where convidado_phone = ${phone} or indicador_phone = ${phone}`
 

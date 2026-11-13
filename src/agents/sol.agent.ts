@@ -4,6 +4,7 @@
 
 import OpenAI from 'openai'
 import { config } from '../config'
+import { precoDoRoteiro, criarCompra, gerarCheckout, precoUnitario, reais } from '../services/pagamento.service'
 import { registrarConversao, limparPrazoGuia } from '../services/indicacao.service'
 import { lerCadastro } from '../services/presenca.service'
 import { log } from '../logger'
@@ -143,16 +144,24 @@ export async function responderOfertaGuia(
     return { resultado: 'ativada', textos: [activationMsg] }
   }
 
-  const payText = 'Perfeito! Toque no botão abaixo para ativar:'
-  await saveMessage(phone, 'assistant', `${payText}\n${config.companionPaymentLink}`)
+  // Cobrança individual (a AbacatePay avisa o pagamento com a nossa referência); o link fixo é só reserva
+  let linkGuia = config.companionPaymentLink
+  try {
+    const compra = await criarCompra(phone, 'guia_mes', 1, channel === 'app' ? 'app' : 'whatsapp')
+    linkGuia = (await gerarCheckout(compra.ref)) ?? linkGuia
+  } catch (err) {
+    log.error('erro ao criar cobrança da Guia', err, { phone })
+  }
+  const payText = `Perfeito! A Guia Sol por 30 dias sai por ${reais(precoUnitario('guia_mes'))}. Toque no botão abaixo para ativar:`
+  await saveMessage(phone, 'assistant', `${payText}\n${linkGuia}`)
   if (channel === 'whatsapp') {
     try {
-      await sendCtaButton(phone, payText, 'Ativar agora', config.companionPaymentLink)
+      await sendCtaButton(phone, payText, 'Ativar agora', linkGuia)
     } catch {
-      await sendWithTyping(phone, `${payText}\n\n${config.companionPaymentLink}`, 400)
+      await sendWithTyping(phone, `${payText}\n\n${linkGuia}`, 400)
     }
   }
-  return { resultado: 'pagamento', textos: [`${payText}\n${config.companionPaymentLink}`] }
+  return { resultado: 'pagamento', textos: [`${payText}\n${linkGuia}`] }
 }
 
 // Guarda contra glitch raro do modelo (mais provável em temperatura alta): repetir a mensagem
@@ -602,7 +611,7 @@ export interface PedidoRoteiroApp {
   origem?: string
 }
 
-export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp): Promise<string> {
+export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp, pago = false): Promise<string> {
   marcarCanal(phone, 'app')
   cancelGuiaReminder(phone)
   const conv = await getOrCreateConversation(phone)
@@ -629,7 +638,7 @@ export async function criarRoteiroPeloApp(phone: string, p: PedidoRoteiroApp): P
     hotel_hospedagem: p.hospedagem || 'não informado',
     horario_volta: p.horaVolta || 'não informado',
     cidade_origem: p.origem || 'não informado',
-  }, 'app')
+  }, 'app', pago)
 }
 
 // ----------------------------------------------------------------
@@ -669,7 +678,7 @@ async function handleReenviarRoteiro(phone: string, channel: Canal): Promise<str
 // ----------------------------------------------------------------
 // Handler: gerar_roteiro_de_viagem
 // ----------------------------------------------------------------
-async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel: Canal = 'whatsapp'): Promise<string> {
+async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel: Canal = 'whatsapp', pago = false): Promise<string> {
   const {
     destino,
     data_chegada,
@@ -718,10 +727,24 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   // Descobre quantos dias de roteiro
   const days = await classifyDays(data_chegada, data_saida, phone)
 
-  // RA-ROT-01: sem a Guia, o roteiro grátis cobre 1 dia (dias pagos ainda não existem)
-  if (!existingConv.hasCompanion && days > 1) {
-    return responder(phone, channel,
-      `Sem a Guia Sol, o roteiro grátis cobre 1 dia. Posso montar só o dia ${formatarData(data_chegada)} em ${destino}, ou você ativa a Guia Sol e eu monto os ${days} dias. O que prefere?`, 600)
+  // Roteiro já pago (confirmado pela AbacatePay): gera direto
+  if (pago) return gerarSemCobrar(phone, days, resolvedName, channel)
+
+  // RA-ROT-02: sem a Guia, o 1º dia sai grátis (se houver grátis na semana) e cada dia a mais é pago.
+  // Cria a cobrança desta pessoa e manda o link; o roteiro é gerado quando o pagamento cai.
+  if (!existingConv.hasCompanion) {
+    const preco = await precoDoRoteiro(phone, days)
+    if (preco.diasPagos > 0) {
+      try {
+        const compra = await criarCompra(phone, 'roteiro', preco.diasPagos, channel === 'app' ? 'app' : 'whatsapp', { args })
+        const link = (await gerarCheckout(compra.ref))!
+        const texto = `Seu roteiro de ${days} dias em ${destino} fica em ${reais(compra.valor_centavos)} (${preco.temGratis ? '1º dia grátis, ' : ''}${preco.diasPagos} ${preco.diasPagos === 1 ? 'dia' : 'dias'} a ${reais(compra.valor_centavos / preco.diasPagos)}). É só pagar pelo link que eu já monto e te mando.`
+        return enviarPagamento(phone, channel, texto, link)
+      } catch (err) {
+        log.error('erro ao criar cobrança do roteiro', err, { phone })
+        return responder(phone, channel, 'Não consegui gerar o pagamento agora. Tenta de novo em instantes?', 600)
+      }
+    }
   }
 
   // Verifica e desconta crédito grátis via Edge Function
@@ -994,4 +1017,16 @@ async function updatePhaseFromResponse(
       await updateConversation(phone, { phase: 2 })
     }
   }
+}
+
+// Depois do pagamento confirmado: gera o roteiro que ficou guardado na compra
+export async function gerarRoteiroPago(phone: string, origem: string, pedido: any): Promise<void> {
+  if (pedido?.app) { await criarRoteiroPeloApp(phone, pedido.app as PedidoRoteiroApp, true); return }
+  if (pedido?.args) { await handleGerarRoteiro(phone, pedido.args as GerarRoteirArgs, origem === 'app' ? 'app' : canalAtual(phone), true); return }
+  throw new Error('compra de roteiro sem pedido guardado')
+}
+
+// Mensagem de confirmação no canal da pessoa (app salva; WhatsApp envia)
+export async function avisarPagamento(phone: string, texto: string): Promise<void> {
+  await responder(phone, canalAtual(phone), texto, 400)
 }

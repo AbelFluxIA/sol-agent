@@ -14,6 +14,8 @@ import { generateStoryImage, uploadStoryImage } from '../services/story.service'
 import { buildGuiaActivatedMessage, buildReferralMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
 import { config } from '../config'
+import { assinaturaAbacateConfere } from '../services/pagamento.service'
+import { confirmarPagamento } from '../services/pagamento-entrega.service'
 import { limparPrazoGuia } from '../services/indicacao.service'
 import { adminAuth, assinaturaMetaConfere, segredoPagamentoConfere } from '../middleware/limites'
 
@@ -268,6 +270,28 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
   } catch (error) {
     log.error('erro no webhook whatsapp', error, {})
   }
+})
+
+// ----------------------------------------------------------------
+// POST /webhook/abacatepay — avisos da AbacatePay (API v2)
+// Confere o segredo (na URL ou no header) e a assinatura do corpo; libera pela referência.
+// ----------------------------------------------------------------
+router.post('/webhook/abacatepay', async (req: Request, res: Response) => {
+  if (!segredoPagamentoConfere(req) || !assinaturaAbacateConfere((req as any).rawBody, String(req.headers['x-webhook-signature'] || ''))) {
+    log.warn('webhook abacatepay recusado (segredo ou assinatura)', { step: 'webhook-abacatepay' })
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  const body = req.body ?? {}
+  const evento = String(body.event || '')
+  const obj = body.data?.transparent ?? body.data?.checkout ?? {}
+  const ref = obj.metadata?.ref || (typeof obj.externalId === 'string' ? obj.externalId.slice(0, 36) : '')
+  log.info('webhook abacatepay recebido', { step: 'webhook-abacatepay', data: { evento, id: obj.id, status: obj.status, ref: ref || null } })
+  res.status(200).json({ ok: true })
+  if (!['checkout.completed', 'transparent.completed'].includes(evento) || !ref) return
+  if (!['PAID', 'APPROVED'].includes(String(obj.status))) return
+  confirmarPagamento(ref, body.data?.payerInformation?.method ?? null)
+    .catch(err => log.error('erro ao confirmar pagamento', err, { step: 'webhook-abacatepay', data: { ref } }))
 })
 
 // ----------------------------------------------------------------

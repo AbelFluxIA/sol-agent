@@ -19,6 +19,8 @@ import {
 import { log } from '../logger'
 import { excedeu, limitar, podeHoje, segredoConfere } from '../middleware/limites'
 import { excluirConta } from '../services/conta.service'
+import { criarCompra, gerarPix, gerarCheckout, lerPagamento, conferirNaAbacate, precoDoRoteiro, precoUnitario, type TipoCompra } from '../services/pagamento.service'
+import { confirmarPagamento } from '../services/pagamento-entrega.service'
 import { vincularConvite, resumoIndicacao, resgatarDiasGuia, limparPrazoGuia } from '../services/indicacao.service'
 import prisma from '../services/database.service'
 import { salvarFotoPerfil } from '../services/perfil-foto.service'
@@ -412,15 +414,12 @@ router.post('/api/app/roteiros/criar', clientAuthMiddleware, async (req: Request
   const maxDias = conv.hasCompanion ? config.regras.maxDiasComGuia : config.regras.maxDiasSemGuia
   const dias = Math.round((Date.parse(`${b.saida}T12:00:00Z`) - Date.parse(`${b.chegada}T12:00:00Z`)) / 86400000) + 1
   if (dias > maxDias) {
-    res.status(400).json({ error: conv.hasCompanion ? `Com a Guia, o roteiro pode ter até ${maxDias} dias` : 'Sem a Guia Sol, o roteiro grátis cobre 1 dia. Com a Guia, até 7 dias.' }); return
+    res.status(400).json({ error: conv.hasCompanion ? `Com a Guia, o roteiro pode ter até ${maxDias} dias` : `Sem a Guia Sol, o roteiro pode ter até ${maxDias} dias. Com a Guia, até 7.` }); return
   }
-  // Cota semanal (RA-ROT): grátis N por semana; com a Guia (ou no modo demonstração) o teto da Guia
-  const cota = await roteirosDaSemana(phone)
-  const limiteSemana = conv.hasCompanion || config.demoFreeMode ? config.regras.guiaRoteirosSemana : config.regras.roteirosGratisSemana
-  if (cota.usados >= limiteSemana) {
-    const renova = new Date(cota.renovaEm).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', timeZone: 'America/Sao_Paulo' })
-    res.status(429).json({ error: `Você já usou os ${limiteSemana} roteiros desta semana. Renova em ${renova}.` })
-    return
+  // RA-ROT-02: sem a Guia, dias além do grátis são pagos. O app mostra o valor e abre o pagamento.
+  const preco = await precoDoRoteiro(phone, dias)
+  if (preco.diasPagos > 0) {
+    res.status(402).json({ error: 'Pagamento necessário', pagamento: { tipo: 'roteiro', dias, diasPagos: preco.diasPagos, valorCentavos: preco.valorCentavos, temGratis: preco.temGratis } }); return
   }
   if (excedeu('criar-roteiro', phone, 3, 600_000)) { res.status(429).json({ error: 'Espere alguns minutos antes de pedir outro roteiro.' }); return }
   const pedido: PedidoRoteiroApp = {
@@ -594,6 +593,89 @@ router.post('/api/app/conta/excluir', clientAuthMiddleware, async (req: Request,
   } catch (err) {
     log.error('erro ao excluir conta', err, { phone, step: 'excluir-conta' })
     res.status(500).json({ error: 'Não consegui excluir agora. Tente de novo em instantes.' })
+  }
+})
+
+// ─── Pagamentos (AbacatePay v2) ──────────────────────────────────────────────
+// Cria a compra e já devolve o Pix (QR Code e copia e cola) para pagar na própria tela.
+const PEDIDO_CAMPOS = ['destino', 'chegada', 'saida', 'horaChegada', 'horaVolta', 'quemVai', 'adultos', 'criancas', 'pet', 'tipos', 'custos', 'hospedagem', 'origem']
+const visao = (p: any) => ({
+  ref: p.ref, tipo: p.tipo, dias: p.dias, valorCentavos: p.valor_centavos, status: p.status,
+  brCode: p.status === 'pago' ? null : p.br_code, qr: p.status === 'pago' ? null : p.qr_base64,
+  expiraEm: p.expira_em?.toISOString() ?? null, cartaoUrl: p.checkout_url,
+})
+
+router.get('/api/app/precos', clientAuthMiddleware, (_req: Request, res: Response) => {
+  res.json({ roteiroDia: precoUnitario('roteiro'), guiaDia: precoUnitario('guia_dia'), guiaMes: precoUnitario('guia_mes') })
+})
+
+router.post('/api/app/pagamento', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const b = req.body ?? {}
+  const tipo = b.tipo as TipoCompra
+  if (!['roteiro', 'guia_dia', 'guia_mes'].includes(tipo)) { res.status(400).json({ error: 'Tipo de compra inválido' }); return }
+  if (excedeu('pagamento', phone, 8, 600_000)) { res.status(429).json({ error: 'Muitas tentativas. Espere um pouco.' }); return }
+  try {
+    let dias = 1
+    let pedido: unknown
+    if (tipo === 'guia_dia') {
+      dias = Number(b.dias)
+      if (!Number.isInteger(dias) || dias < 1 || dias > 7) { res.status(400).json({ error: 'Escolha de 1 a 7 dias' }); return }
+    }
+    if (tipo === 'roteiro') {
+      const r = b.pedido ?? {}
+      const data = /^\d{4}-\d{2}-\d{2}$/
+      if (typeof r.destino !== 'string' || r.destino.trim().length < 2 || !data.test(r.chegada) || !data.test(r.saida) || r.saida < r.chegada) { res.status(400).json({ error: 'Confira destino e datas' }); return }
+      const total = Math.round((Date.parse(`${r.saida}T12:00:00Z`) - Date.parse(`${r.chegada}T12:00:00Z`)) / 86400000) + 1
+      if (total > config.regras.maxDiasSemGuia) { res.status(400).json({ error: `O roteiro pode ter até ${config.regras.maxDiasSemGuia} dias` }); return }
+      const preco = await precoDoRoteiro(phone, total)
+      if (preco.diasPagos < 1) { res.status(400).json({ error: 'Este roteiro não precisa de pagamento' }); return }
+      dias = preco.diasPagos
+      pedido = { app: Object.fromEntries(PEDIDO_CAMPOS.filter(k => r[k] !== undefined && r[k] !== null).map(k => [k, r[k]])) }
+    }
+    const compra = await criarCompra(phone, tipo, dias, 'app', pedido)
+    res.json(visao(await gerarPix(compra.ref)))
+  } catch (err) {
+    log.error('erro ao criar pagamento', err, { phone, step: 'pagamento' })
+    res.status(502).json({ error: 'Não consegui gerar o pagamento agora. Tente de novo em instantes.' })
+  }
+})
+
+// Situação do pagamento (o app consulta a cada poucos segundos). Se o aviso da AbacatePay
+// atrasar, confere direto lá e libera.
+router.get('/api/app/pagamento/:ref', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  try {
+    let p = await lerPagamento(String(req.params.ref))
+    if (!p || p.phone !== phone) { res.status(404).json({ error: 'Pagamento não encontrado' }); return }
+    if (p.status === 'pendente' && !excedeu(`conferir:${p.ref}`, phone, 1, 12_000) && await conferirNaAbacate(p)) {
+      await confirmarPagamento(p.ref, 'consulta')
+      p = (await lerPagamento(p.ref))!
+    }
+    res.json(visao(p))
+  } catch (err) {
+    log.error('erro ao consultar pagamento', err, { phone, step: 'pagamento' })
+    res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+// Novo QR Code (o anterior venceu) ou link para pagar com cartão
+router.post('/api/app/pagamento/:ref/:acao', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  try {
+    const p = await lerPagamento(String(req.params.ref))
+    if (!p || p.phone !== phone) { res.status(404).json({ error: 'Pagamento não encontrado' }); return }
+    if (p.status === 'pago') { res.json(visao(p)); return }
+    if (req.params.acao === 'pix') { res.json(visao(await gerarPix(p.ref))); return }
+    if (req.params.acao === 'cartao') {
+      const url = await gerarCheckout(p.ref, true)
+      if (!url) { res.status(409).json({ error: 'Pagamento com cartão ainda não está disponível. Use o Pix.' }); return }
+      res.json(visao((await lerPagamento(p.ref))!)); return
+    }
+    res.status(400).json({ error: 'Ação inválida' })
+  } catch (err) {
+    log.error('erro na ação do pagamento', err, { phone, step: 'pagamento' })
+    res.status(502).json({ error: 'Não consegui gerar o pagamento agora. Tente de novo em instantes.' })
   }
 })
 

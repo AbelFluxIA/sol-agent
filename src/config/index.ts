@@ -76,7 +76,7 @@ export const config = {
   regras: {
     roteirosGratisSemana: Number(process.env.FREE_ROTEIROS_PER_WEEK ?? 2),
     diaRoteiroPreco: Number(process.env.ROTEIRO_DAY_PRICE_BRL ?? 4.9),
-    maxDiasSemGuia: Number(process.env.ROTEIRO_MAX_DAYS ?? 1), // RA-ROT-01: roteiro grátis cobre 1 dia (dias pagos: RA-ROT-02, ainda sem pagamento)
+    maxDiasSemGuia: Number(process.env.ROTEIRO_MAX_DAYS ?? 5), // RA-ROT-24; dias além do grátis são pagos (RA-ROT-02)
     guiaRoteirosSemana: Number(process.env.GUIA_ROTEIROS_PER_WEEK ?? 30),
     maxDiasComGuia: Number(process.env.GUIA_ROTEIRO_MAX_DAYS ?? 7),
     guiaPrecoDia: Number(process.env.SOL_GUIA_PRICE_PER_DAY_BRL ?? 9.9),
