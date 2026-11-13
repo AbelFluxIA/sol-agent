@@ -82,12 +82,14 @@ export async function tratarMensagemDeLogin(waId: string, texto: string): Promis
     if (pedido && Date.now() - pedido.criadoEm <= VALIDADE_PEDIDO_MS) pedido.phone = phone
   }
   const code = gerarCodigo(phone)
+  // Duas mensagens: a explicação e, sozinho, o código (fica fácil de copiar)
   const msg =
-    `🔐 Seu código para entrar no app Sol: *${code}*\n\n` +
-    'Copie esse número, volte para o app e cole no campo do código. Vale por 10 minutos.\n\n' +
-    'Não compartilhe com ninguém. Se não foi você que pediu, é só ignorar esta mensagem.'
+    '🔐 Seu código para entrar no app Sol está na próxima mensagem.\n\n' +
+    'Copie o número, volte para o app e cole no campo do código. Vale por 10 minutos.\n\n' +
+    'Não compartilhe com ninguém. Se não foi você que pediu, é só ignorar.'
   try {
     await sendMessage(waId, msg)
+    await sendMessage(waId, code)
     log.info('código de login enviado', { phone, step: 'app-auth', data: { comPedido: !!comPedido } })
   } catch (err) {
     log.error('erro ao enviar código de login', err, { phone, step: 'app-auth' })
