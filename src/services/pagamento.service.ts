@@ -51,6 +51,8 @@ export interface Pagamento {
 }
 
 export async function lerPagamento(ref: string): Promise<Pagamento | null> {
+  // ref é sempre um UUID gerado por nós; qualquer outra coisa (inclusive byte nulo) nem vai ao banco
+  if (!/^[0-9a-f-]{8,40}$/i.test(ref)) return null
   const r = await prisma.$queryRaw<Pagamento[]>`select * from public.sol_pagamentos where ref = ${ref}`
   return r[0] ?? null
 }

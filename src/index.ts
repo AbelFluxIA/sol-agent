@@ -1,5 +1,6 @@
 // src/index.ts
 import 'dotenv/config'
+import { modoCarga, chamadasSimuladas, whatsappSimulado } from './carga-mock' // primeiro: no modo de teste, simula os serviços de fora antes de qualquer outro arquivo carregar
 import express from 'express'
 import cors from 'cors'
 import { config } from './config'
@@ -9,10 +10,10 @@ import appRoutes from './routes/app.routes'
 import prisma from './services/database.service'
 import { startDailyJobs } from './jobs/daily'
 import { expirarGuiasDeCredito } from './services/indicacao.service'
-import { waitForActiveOperations } from './shutdown'
+import { waitForActiveOperations, operacoesAtivas } from './shutdown'
 import adminRoutes from './routes/admin.routes'
 import { definirDestinoDosLogs } from './logger'
-import { guardarLog, iniciarLogsNoBanco, esvaziarLogs, contarPedido } from './services/logs.service'
+import { guardarLog, iniciarLogsNoBanco, esvaziarLogs, contarPedido, atrasoDoProcesso } from './services/logs.service'
 
 const app = express()
 
@@ -48,6 +49,20 @@ app.use((_req, res, next) => {
 app.use(express.json({ limit: '200kb', verify: (req, _res, buf) => { (req as any).rawBody = buf } }))
 app.use(express.urlencoded({ extended: true, limit: '50kb' }))
 
+// Byte nulo não existe em texto de verdade e o banco recusa: endereço com %00 é pedido
+// inválido, e dentro do corpo ele é simplesmente removido (evita erro 500 por entrada maliciosa).
+const semNulo = (v: any, nivel = 0): any => {
+  if (typeof v === 'string') return v.includes('\u0000') ? v.replace(/\u0000/g, '') : v
+  if (nivel > 6 || v === null || typeof v !== 'object') return v
+  for (const k of Object.keys(v)) v[k] = semNulo(v[k], nivel + 1)
+  return v
+}
+app.use((req, res, next) => {
+  if (/%00|\u0000/.test(req.url)) { res.status(400).json({ error: 'Pedido inválido' }); return }
+  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) req.body = semNulo(req.body)
+  next()
+})
+
 // Registro de cada pedido (painel de administração): tempo e resultado por rota.
 // No banco vão só o que importa: tudo que muda algo (POST etc.), todo erro e toda
 // resposta lenta. As consultas que o app repete a cada poucos segundos (conversa,
@@ -68,6 +83,21 @@ app.use((req, res, next) => {
   })
   next()
 })
+
+// Só no modo de teste de carga: o que foi "enviado" pelo WhatsApp simulado e a contagem
+// das chamadas simuladas. Em produção esta rota não existe.
+if (modoCarga) {
+  app.get('/__carga/estado', (req, res) => {
+    const para = String(req.query.para ?? '').replace(/\D/g, '')
+    const mem = process.memoryUsage()
+    res.json({
+      chamadas: chamadasSimuladas,
+      mensagens: para ? whatsappSimulado.filter(m => m.para.endsWith(para.slice(-8))).slice(-10) : whatsappSimulado.length,
+      memoriaMb: Math.round(mem.rss / 1048576), heapMb: Math.round(mem.heapUsed / 1048576), noAr: Math.round(process.uptime()),
+      atraso: atrasoDoProcesso(), operacoes: operacoesAtivas(),
+    })
+  })
+}
 
 // Rotas do app cliente (auth + perfil)
 app.use('/', appRoutes)
