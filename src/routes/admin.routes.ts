@@ -46,7 +46,7 @@ router.get(`${A}/resumo`, adminAppAuth, async (req: Request, res: Response) => {
       prisma.$queryRaw<any[]>`select count(distinct "conversationId") filter (where "createdAt" > ${UTC_AGORA} - interval '24 hours')::int h24, count(distinct "conversationId")::int d7 from "Message" where role = 'user' and "createdAt" > ${UTC_AGORA} - interval '7 days'`,
       prisma.$queryRaw<any[]>`select count(distinct phone) filter (where ts > now() - interval '24 hours')::int h24, count(distinct phone)::int d7 from public.sol_logs where phone is not null and step <> 'admin' and ts > now() - interval '7 days'`,
       prisma.$queryRaw<any[]>`select count(*)::int iniciados, count(*) filter (where cadastro_concluido_em is not null)::int concluidos from public.sol_cadastro`,
-      prisma.$queryRaw<any[]>`select status, count(*)::int n from "Itinerary" group by status order by n desc`,
+      prisma.$queryRaw<any[]>`select count(*) filter (where "rawItinerary" is not null)::int prontos, count(*) filter (where "rawItinerary" is null)::int incompletos, count(*) filter (where "rawItinerary" is not null and "createdAt" > ${UTC_AGORA} - interval '7 days')::int prontos7 from "Itinerary"`,
       prisma.$queryRaw<any[]>`select status, count(*)::int n, coalesce(sum(valor_centavos), 0)::int centavos, coalesce(sum(valor_centavos) filter (where coalesce(pago_em, criado_em) > now() - interval '30 days'), 0)::int centavos30 from public.sol_pagamentos group by status`,
       prisma.$queryRaw<any[]>`select count(*) filter (where msg = 'login app realizado')::int entraram, count(*) filter (where level = 'warn' and msg like 'login:%')::int falhas, count(*) filter (where msg in ('código de login enviado', 'otp enviado'))::int codigos from public.sol_logs where step = 'app-auth' and ts > now() - interval '7 days'`,
       prisma.$queryRaw<any[]>`select count(*) filter (where level = 'error')::int erros, count(*) filter (where level = 'warn')::int avisos from public.sol_logs where ts > now() - interval '24 hours'`,
@@ -67,7 +67,7 @@ router.get(`${A}/resumo`, adminAppAuth, async (req: Request, res: Response) => {
     registrar(req, 'visão geral aberta')
     res.json({
       usuarios: { ...usuarios[0], conversaram24h: ativos[0].h24, conversaram7d: ativos[0].d7, ativos24h: appAtivos[0].h24, ativos7d: appAtivos[0].d7, cadastroIniciado: cadastro[0].iniciados, cadastroConcluido: cadastro[0].concluidos },
-      roteirosPorStatus: roteirosStatus,
+      roteiros: roteirosStatus[0],
       pagamentos,
       logins7d: logins[0],
       ultimas24h: erros24h[0],
@@ -103,7 +103,7 @@ router.get(`${A}/saude`, adminAppAuth, async (req: Request, res: Response) => {
           (array_agg(coalesce(error->>'message', msg) order by ts desc) filter (where level = 'error'))[1] mensagem,
           round(avg(duration_ms) filter (where duration_ms is not null))::int media_ms
         from public.sol_logs where ts > now() - interval '48 hours' and step is not null and step not in ('admin', 'http', 'app-cliente') group by 1 order by erros desc, total desc limit 60`,
-      prisma.$queryRaw<any[]>`select max(ts) ts from public.sol_logs where msg = 'mensagem recebida' and coalesce(data->>'channel', 'whatsapp') = 'whatsapp'`,
+      prisma.$queryRaw<any[]>`select max(ts) ts from public.sol_logs where (msg = 'mensagem recebida' and coalesce(data->>'channel', 'whatsapp') = 'whatsapp') or msg = 'código de login enviado'`,
     ])
     // Serviços externos: agrupa as etapas pelo serviço de que dependem
     const servicos = SERVICOS.map(([nome, re]) => {
@@ -202,7 +202,7 @@ router.get(`${A}/usuario/linha-do-tempo`, adminAppAuth, async (req: Request, res
     const variantes = [...new Set([phone, alvo, ...phoneVariants(phone)])]
     const conv = await prisma.conversation.findUnique({ where: { phone }, select: { id: true, name: true, createdAt: true } })
     const [logs, roteiros, pagamentos, aceites, cadastro, indicacao] = await Promise.all([
-      prisma.$queryRaw<any[]>`select id::float id, ts, level, step, msg, duration_ms, data, error from public.sol_logs where phone in (${Prisma.join(variantes)}) and (step is distinct from 'http' or level <> 'info') order by ts desc limit 400`,
+      prisma.$queryRaw<any[]>`select id::float id, ts, level, step, msg, duration_ms, data, error from public.sol_logs where phone in (${Prisma.join(variantes)}) and (step is distinct from 'http' or level <> 'info') and not (step is not distinct from 'admin' and (msg like '%vist%' or msg like '%consultad%')) order by ts desc limit 400`,
       conv ? prisma.itinerary.findMany({ where: { conversationId: conv.id }, orderBy: { createdAt: 'desc' }, take: 60, select: { id: true, destination: true, arrivalDate: true, departureDate: true, days: true, status: true, createdAt: true, pdfUrl: true } }) : Promise.resolve([]),
       prisma.$queryRaw<any[]>`select ref, tipo, dias, valor_centavos, status, metodo, origem, criado_em, pago_em from public.sol_pagamentos where phone in (${Prisma.join(variantes)}) order by criado_em desc limit 60`,
       prisma.$queryRaw<any[]>`select tipo, versao, aceito, criado_em from public.sol_consentimentos where phone in (${Prisma.join(variantes)}) order by criado_em desc limit 60`,
