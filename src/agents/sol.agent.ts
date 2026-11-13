@@ -4,7 +4,7 @@
 
 import OpenAI from 'openai'
 import { config } from '../config'
-import { precoDoRoteiro, criarCompra, gerarCheckout, precoUnitario, reais } from '../services/pagamento.service'
+import { precoDoRoteiro, diasDaViagem, criarCompra, gerarCheckout, precoUnitario, reais } from '../services/pagamento.service'
 import { registrarConversao, limparPrazoGuia } from '../services/indicacao.service'
 import { lerCadastro } from '../services/presenca.service'
 import { log } from '../logger'
@@ -51,7 +51,7 @@ import {
   buildGuiaActivatedMessage,
   buildGuiaDeclineMessage,
 } from '../prompts/sol.prompts'
-import { PRICES, ValidDays } from '../types'
+import { PRICES, ValidDays, VALID_DAYS } from '../types'
 
 const openai = new OpenAI({ apiKey: config.openai.apiKey })
 
@@ -734,12 +734,13 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   // RA-ROT-02: sem a Guia, o 1º dia sai grátis (se houver grátis na semana) e cada dia a mais é pago.
   // Cria a cobrança desta pessoa e manda o link; o roteiro é gerado quando o pagamento cai.
   if (!existingConv.hasCompanion) {
-    const preco = await precoDoRoteiro(phone, days)
+    const diasViagem = diasDaViagem(data_chegada, data_saida) // sair hoje e voltar amanhã = 1 dia
+    const preco = await precoDoRoteiro(phone, diasViagem)
     if (preco.diasPagos > 0) {
       try {
         const compra = await criarCompra(phone, 'roteiro', preco.diasPagos, channel === 'app' ? 'app' : 'whatsapp', { args })
         const link = (await gerarCheckout(compra.ref))!
-        const texto = `Seu roteiro de ${days} dias em ${destino} fica em ${reais(compra.valor_centavos)} (${preco.temGratis ? '1º dia grátis, ' : ''}${preco.diasPagos} ${preco.diasPagos === 1 ? 'dia' : 'dias'} a ${reais(compra.valor_centavos / preco.diasPagos)}). É só pagar pelo link que eu já monto e te mando.`
+        const texto = `Seu roteiro de ${diasViagem} ${diasViagem === 1 ? 'dia' : 'dias'} em ${destino} fica em ${reais(compra.valor_centavos)} (${preco.temGratis ? '1º dia grátis, ' : ''}${preco.diasPagos} ${preco.diasPagos === 1 ? 'dia' : 'dias'} a ${reais(compra.valor_centavos / preco.diasPagos)}). É só pagar pelo link que eu já monto e te mando.`
         return enviarPagamento(phone, channel, texto, link)
       } catch (err) {
         log.error('erro ao criar cobrança do roteiro', err, { phone })
@@ -755,8 +756,9 @@ async function handleGerarRoteiro(phone: string, args: GerarRoteirArgs, channel:
   if (hasFreeCredit) return gerarSemCobrar(phone, days, resolvedName, channel)
 
   // Sem créditos — cobra
-  const prices = PRICES[days as ValidDays]
-  const paymentLink = config.paymentLinks[days]
+  const diasTabela = VALID_DAYS.includes(days as ValidDays) ? days : VALID_DAYS.reduce((p, c) => Math.abs(c - days) < Math.abs(p - days) ? c : p)
+  const prices = PRICES[diasTabela as ValidDays]
+  const paymentLink = config.paymentLinks[diasTabela]
 
   if (!paymentLink) {
     log.error('link de pagamento não configurado', new Error(`missing payment link for ${days} days`), { phone, data: { days } })

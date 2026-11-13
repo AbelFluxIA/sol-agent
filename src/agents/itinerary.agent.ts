@@ -39,8 +39,9 @@ function diasPorData(arrivalDate: string, departureDate: string): ValidDays | nu
   if (!iso.test(arrivalDate) || !iso.test(departureDate)) return null
   const n = Math.round((Date.parse(`${departureDate}T12:00:00Z`) - Date.parse(`${arrivalDate}T12:00:00Z`)) / 86400000) + 1
   if (!Number.isFinite(n) || n < 1) return null
-  if (VALID_DAYS.includes(n as ValidDays)) return n as ValidDays
-  return VALID_DAYS.reduce((prev, curr) => Math.abs(curr - n) < Math.abs(prev - n) ? curr : prev)
+  // Número exato de datas do roteiro (chegada e volta contam). Antes era arredondado para
+  // 1, 2, 3, 5, 7, 10 ou 15, e uma viagem de 4 datas pedia à IA "3 dias", contradizendo as datas.
+  return Math.min(n, 15) as ValidDays
 }
 
 export async function classifyDays(arrivalDate: string, departureDate: string, phone?: string): Promise<ValidDays> {

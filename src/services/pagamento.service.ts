@@ -35,7 +35,19 @@ export const reais = (c: number) => `R$ ${(c / 100).toFixed(2).replace('.', ',')
 
 // RA-ROT-02: com roteiro grátis disponível na semana, o 1º dia é grátis e os outros pagos;
 // sem grátis, todos pagos. Com a Guia não há cobrança por dia.
+// Dias de uma viagem, como o fundador conta (13/11): sair hoje e voltar amanhã é 1 dia.
+// Ou seja, dias = volta − chegada, e ir e voltar no mesmo dia também é 1 dia.
+// É a conta usada para o limite de dias e para o preço. (O texto do roteiro continua
+// cobrindo todas as datas: o dia da chegada e o da volta.)
+export function diasDaViagem(chegada: string, saida: string): number {
+  const n = Math.round((Date.parse(`${saida}T12:00:00Z`) - Date.parse(`${chegada}T12:00:00Z`)) / 86400000)
+  return Number.isFinite(n) ? Math.max(1, n) : 1
+}
+
 export async function precoDoRoteiro(phone: string, dias: number): Promise<{ diasPagos: number; valorCentavos: number; temGratis: boolean }> {
+  // Modo grátis de teste (DEMO_FREE_MODE): o app avisa "roteiros grátis durante o teste", então nenhum dia é cobrado.
+  // (Até 13/11 esta conta ignorava o modo de teste e cobrava os dias além do primeiro.)
+  if (config.demoFreeMode) return { diasPagos: 0, valorCentavos: 0, temGratis: true }
   const conv = await getOrCreateConversation(phone)
   if (conv.hasCompanion) return { diasPagos: 0, valorCentavos: 0, temGratis: true }
   const cota = await roteirosDaSemana(phone)
