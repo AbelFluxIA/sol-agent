@@ -99,12 +99,18 @@ export async function avaliarAvisos(phone: string): Promise<void> {
     // 2. Eventos de hoje na cidade (com fonte)
     let eventosHoje = 0
     try {
-      const eventos = (await eventosDaCidade(destino, hoje, hoje, phone)).slice(0, 2)
+      // Só evento que ainda vai começar (pelo menos 30 min à frente). Sem hora informada, só de manhã.
+      // Antes saía aviso às 14h18 de um evento que tinha começado às 8h.
+      const agoraMin = horaBR()
+      const eventos = (await eventosDaCidade(destino, hoje, hoje, phone))
+        .filter(e => { const m = e.hora ? minutos(e.hora) : null; return m !== null ? m >= agoraMin + 30 : agoraMin < 12 * 60 })
+        .slice(0, 2)
       eventosHoje = eventos.length
       for (const e of eventos) await criar(phone, { tipo: 'evento', nivel: 'info', chave: `evento:${hoje}:${e.titulo}`, titulo: `Hoje em ${cidade}: ${e.titulo}`, texto: [e.hora ? `Às ${e.hora}` : null, e.local ? `em ${e.local}` : null, e.preco, e.resumo].filter(Boolean).join(' · ').replace(/[.\s]+$/, '') + '. Confirme na fonte antes de ir.', link: e.fonte })
     } catch { /* sem eventos: segue */ }
 
     // 3. Paradas de hoje no roteiro que constam fechadas no horário (horário desta semana, já com feriado)
+    const fechadasHoje: string[] = []
     try {
       const it = await getLatestItinerary(phone)
       if (it?.rawItinerary && it.arrivalDate && it.arrivalDate <= hoje && (it.departureDate ?? it.arrivalDate) >= hoje) {
@@ -117,7 +123,10 @@ export async function avaliarAvisos(phone: string): Promise<void> {
           const l = await lerLugar(p.consulta && p.consulta.length > 3 ? p.consulta : `${p.nome}, ${destino}`, null, 'id,businessStatus,currentOpeningHours.periods').catch(() => null)
           const min = minutos(p.hora)
           const fechado = l && (l.estado === 'CLOSED_PERMANENTLY' || l.estado === 'CLOSED_TEMPORARILY' || (min !== null && abertoEm(l.periodosDaSemana, diaSemana, min) === false))
-          if (fechado) await criar(phone, { tipo: 'roteiro', nivel: 'atencao', chave: `roteiro:${hoje}:${it.id}:${p.nome}`, titulo: `${p.nome.replace(/\*/g, '')}: não abre hoje às ${p.hora}`, texto: `Pelo Google Maps, esse lugar não está aberto hoje às ${p.hora}, horário da sua parada. Abra a atividade para trocar por outro lugar que esteja aberto.`, link: `/app/roteiro/atividade?id=${encodeURIComponent(it.id)}&d=${dia}&a=${p.indice}&fechado=1` })
+          if (fechado) {
+            await criar(phone, { tipo: 'roteiro', nivel: 'atencao', chave: `roteiro:${hoje}:${it.id}:${p.nome}`, titulo: `${p.nome.replace(/\*/g, '')}: não abre hoje às ${p.hora}`, texto: `Pelo Google Maps, esse lugar não está aberto hoje às ${p.hora}, horário da sua parada. Abra a atividade para trocar por outro lugar que esteja aberto.`, link: `/app/roteiro/atividade?id=${encodeURIComponent(it.id)}&d=${dia}&a=${p.indice}&fechado=1` })
+            fechadasHoje.push(`${p.nome.replace(/\*/g, '')} não abre hoje às ${p.hora}`)
+          }
         }
       }
     } catch { /* sem conferência: segue */ }
@@ -133,8 +142,10 @@ export async function avaliarAvisos(phone: string): Promise<void> {
           const doDia = lerParadas(it.rawItinerary).paradas.filter(p => p.dia === dia && !ehLogistica(p.nome))
           if (doDia.length) roteiro = `Seu roteiro de hoje tem ${doDia.length} ${doDia.length === 1 ? 'parada' : 'paradas'}; a primeira é ${doDia[0].nome.replace(/\*/g, '')}, às ${doDia[0].hora}.`
         }
+        // O resumo é a ÚNICA notificação da manhã: o que pede atenção (alerta de tempo, parada fechada) vem primeiro
         const partes = [
           tempoHoje ? `Tempo hoje: ${tempoHoje}${temAlertaOficial ? ' (há alerta do INMET, veja o aviso)' : ''}.` : null,
+          fechadasHoje.length ? `Atenção: ${fechadasHoje.slice(0, 2).join('; ')}. Abra o app para trocar.` : null,
           roteiro || 'Você não tem paradas no roteiro para hoje.',
           eventosHoje ? `Achei ${eventosHoje} ${eventosHoje === 1 ? 'evento' : 'eventos'} hoje na cidade (veja os avisos).` : null,
         ].filter(Boolean)
@@ -161,11 +172,16 @@ export async function avisosPara(phone: string, cidadeAtual?: string | null, ava
       select id::int as id, tipo, nivel, titulo, texto, link, criado_em from public.sol_avisos
       where phone = ${phone} and tipo <> 'comunicado-lido' and lido_em is null and (valido_ate is null or valido_ate > now()) order by criado_em desc limit 20`,
   ])
+  // Evento que começou há mais de 2 horas sai da lista (o texto do aviso começa com "Às HH:MM")
+  const agoraMin = horaBR()
+  const vigentes = pessoais.filter(a => { const m = a.tipo === 'evento' ? a.texto.match(/^Às (\d{2}):(\d{2})/) : null; return !m || Number(m[1]) * 60 + Number(m[2]) > agoraMin - 120 })
+  // O que apareceu na lista do app não vira notificação depois
+  if (vigentes.length) await prisma.$executeRaw`update public.sol_avisos set visto_app_em = now() where phone = ${phone} and visto_app_em is null and id = any(${vigentes.map(a => a.id)}::bigint[])`.catch(() => { /* segue sem marcar */ })
   const dispensados = new Set((await prisma.$queryRaw<{ chave: string }[]>`select chave from public.sol_avisos where phone = ${phone} and tipo = 'comunicado-lido'`).map(x => x.chave))
   const peso: Record<Nivel, number> = { urgente: 0, atencao: 1, info: 2 }
   return [
     ...comunicados.filter(c => !dispensados.has(`comunicado:${c.id}`)).map((c): Aviso => ({ id: `c${c.id}`, origem: 'equipe', tipo: 'comunicado', nivel: c.nivel, titulo: c.titulo, texto: c.texto, link: c.link, em: c.criado_em.toISOString() })),
-    ...pessoais.map((a): Aviso => ({ id: `a${a.id}`, origem: 'sol', tipo: a.tipo, nivel: a.nivel, titulo: a.titulo, texto: a.texto, link: a.link, em: a.criado_em.toISOString() })),
+    ...vigentes.map((a): Aviso => ({ id: `a${a.id}`, origem: 'sol', tipo: a.tipo, nivel: a.nivel, titulo: a.titulo, texto: a.texto, link: a.link, em: a.criado_em.toISOString() })),
   ].sort((x, y) => peso[x.nivel] - peso[y.nivel] || (x.em < y.em ? 1 : -1))
 }
 
@@ -188,6 +204,52 @@ export async function avisosParaConversa(phone: string): Promise<string> {
   } catch { return '' }
 }
 
+// Envio dos avisos pendentes de UMA pessoa. `mandar` existe para o teste trocar o envio de verdade por um de mentira.
+type AvisoParaEnviar = { id: number; tipo: string; nivel: Nivel; titulo: string; texto: string; link: string | null }
+export async function enviarAvisosDe(phone: string, porPush: boolean, mandar: (a: AvisoParaEnviar) => Promise<boolean> = async (a) => {
+  if (porPush) {
+    // O toque abre a tela do aviso; aviso com link de fora (INMET, fonte do evento) abre o Início com ele em destaque
+    return (await enviarPush(phone, { titulo: a.titulo, texto: a.texto, link: a.link && a.link.startsWith('/app') ? a.link : `/app?aviso=a${a.id}`, tag: `aviso-${a.id}` })) > 0
+  }
+  const link = a.link ? (/^https?:/.test(a.link) ? a.link : `${config.appPublicUrl}${a.link}`) : ''
+  await sendHuman(phone, `${a.nivel === 'info' ? '🔔' : '⚠️'} *${a.titulo}*\n${a.texto}${link ? `\n${link}` : ''}`)
+  return true
+}): Promise<number> {
+  let enviados = 0
+  const [{ n }] = await prisma.$queryRaw<{ n: number }[]>`
+    select count(*)::int n from public.sol_avisos where phone = ${phone}
+      and greatest(coalesce(enviado_whatsapp_em, 'epoch'), coalesce(enviado_push_em, 'epoch')) > (now() at time zone 'America/Sao_Paulo')::date at time zone 'America/Sao_Paulo'`
+  let enviadosHoje = n
+  // Só vai para o celular o que importa: o resumo da manhã (um só, que já fala do tempo, de parada fechada e
+  // dos eventos) e, depois dele, avisos de atenção ou urgentes que surgirem. Evento sozinho não notifica:
+  // fica no resumo e na lista do app. O que a pessoa já viu no app também não notifica.
+  // Teto: 2 por dia (3 se houver aviso urgente). Antes eram 3 de qualquer tipo.
+  const candidatos = await prisma.$queryRaw<{ id: number; tipo: string; nivel: Nivel; titulo: string; texto: string; link: string | null }[]>`
+    select id::int as id, tipo, nivel, titulo, texto, link from public.sol_avisos
+    where phone = ${phone} and tipo <> 'comunicado-lido' and enviado_whatsapp_em is null and enviado_push_em is null and lido_em is null and visto_app_em is null
+      and (valido_ate is null or valido_ate > now()) and (tipo = 'resumo' or nivel in ('urgente', 'atencao'))
+    order by (tipo = 'resumo') desc, (nivel = 'urgente') desc, criado_em asc limit 10`
+  if (!candidatos.length) return 0
+  let pendentes = candidatos
+  const resumo = candidatos.find(a => a.tipo === 'resumo')
+  if (resumo) {
+    // Com o resumo na fila, os avisos de atenção do mesmo momento já estão ditos nele: não saem em separado
+    const cobertos = candidatos.filter(a => a.tipo !== 'resumo' && a.nivel !== 'urgente').map(a => a.id)
+    if (cobertos.length) await prisma.$executeRaw`update public.sol_avisos set visto_app_em = now() where id = any(${cobertos}::bigint[])`
+    pendentes = candidatos.filter(a => a.tipo === 'resumo' || a.nivel === 'urgente')
+  }
+  for (const a of pendentes) {
+    if (enviadosHoje >= (a.nivel === 'urgente' ? 3 : 2)) continue
+    if (!(await mandar(a))) break // inscrições vencidas: na próxima rodada cai no WhatsApp
+    if (porPush) await prisma.$executeRaw`update public.sol_avisos set enviado_push_em = now() where id = ${a.id}`
+    else await prisma.$executeRaw`update public.sol_avisos set enviado_whatsapp_em = now() where id = ${a.id}`
+    enviados++
+    log.info('aviso enviado ao celular', { phone, step: 'avisos', data: { id: a.id, nivel: a.nivel, tipo: a.tipo, por: porPush ? 'push' : 'whatsapp' } })
+    enviadosHoje++
+  }
+  return enviados
+}
+
 // ─── Envio ao celular (a cada 30 min) ────────────────────────────────────────
 // Para cada pessoa em viagem com a Guia: avalia as regras e manda o que ainda não foi.
 // Quem ligou as notificações do app recebe por lá (sem custo e sem a janela de 24 h);
@@ -206,29 +268,7 @@ export async function enviarAvisosPendentes(): Promise<void> {
         // Fora da janela de 24 h o WhatsApp só aceita mensagem modelo: o aviso fica só no app
         if (!ultima || Date.now() - ultima.getTime() > 23 * 3600_000) continue
       }
-      const [{ n }] = await prisma.$queryRaw<{ n: number }[]>`
-        select count(*)::int n from public.sol_avisos where phone = ${phone}
-          and greatest(coalesce(enviado_whatsapp_em, 'epoch'), coalesce(enviado_push_em, 'epoch')) > (now() at time zone 'America/Sao_Paulo')::date at time zone 'America/Sao_Paulo'`
-      let restam = Math.max(0, 3 - n)
-      if (!restam) continue
-      const pendentes = await prisma.$queryRaw<{ id: number; tipo: string; nivel: Nivel; titulo: string; texto: string; link: string | null }[]>`
-        select id::int as id, tipo, nivel, titulo, texto, link from public.sol_avisos
-        where phone = ${phone} and tipo <> 'comunicado-lido' and enviado_whatsapp_em is null and enviado_push_em is null and lido_em is null and (valido_ate is null or valido_ate > now())
-        order by (nivel = 'urgente') desc, (nivel = 'atencao') desc, criado_em asc limit ${restam}`
-      for (const a of pendentes) {
-        if (porPush) {
-          // O toque abre a tela do aviso; aviso com link de fora (INMET, fonte do evento) abre o Início com ele em destaque
-          const chegou = await enviarPush(phone, { titulo: a.titulo, texto: a.texto, link: a.link && a.link.startsWith('/app') ? a.link : `/app?aviso=a${a.id}`, tag: `aviso-${a.id}` })
-          if (!chegou) break // inscrições vencidas: na próxima rodada cai no WhatsApp
-          await prisma.$executeRaw`update public.sol_avisos set enviado_push_em = now() where id = ${a.id}`
-        } else {
-          const link = a.link ? (/^https?:/.test(a.link) ? a.link : `${config.appPublicUrl}${a.link}`) : ''
-          await sendHuman(phone, `${a.nivel === 'info' ? '🔔' : '⚠️'} *${a.titulo}*\n${a.texto}${link ? `\n${link}` : ''}`)
-          await prisma.$executeRaw`update public.sol_avisos set enviado_whatsapp_em = now() where id = ${a.id}`
-        }
-        log.info('aviso enviado ao celular', { phone, step: 'avisos', data: { id: a.id, nivel: a.nivel, tipo: a.tipo, por: porPush ? 'push' : 'whatsapp' } })
-        restam--
-      }
+      await enviarAvisosDe(phone, porPush)
     } catch (err) {
       log.warn('envio de aviso falhou', { phone, step: 'avisos', data: { error: (err as Error).message } })
     }
