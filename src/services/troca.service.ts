@@ -16,6 +16,7 @@ const MOTIVOS: Record<string, string> = {
   longe: 'a pessoa achou longe: sugira algo mais perto da parada anterior',
   coberto: 'a pessoa quer um lugar coberto (chuva ou calor)',
   outro: 'a pessoa prefere outra opção',
+  fechado: 'o lugar atual está FECHADO nesse dia e horário: a nova parada precisa estar ABERTA nesse dia da semana e horário (confirme no Google Search), de preferência do mesmo tipo e perto',
 }
 export const MOTIVOS_DE_TROCA = Object.keys(MOTIVOS)
 
@@ -85,6 +86,8 @@ Responda SOMENTE com o bloco novo, sem comentários.`
   // Cópia usada pelo link público do roteiro (/r/código)
   if (it.pdfUrl) await prisma.$executeRaw`update public.generated_itineraries set text_content = ${texto} where pdf_url = ${it.pdfUrl}`.catch(() => { /* sem cópia pública */ })
   agendarPdfNovo(phone, itineraryId)
+  // O aviso "não abre hoje" da parada que saiu deixa de valer (antes continuava no Início depois da troca)
+  await prisma.$executeRaw`update public.sol_avisos set lido_em = now() where phone = ${phone} and tipo = 'roteiro' and lido_em is null and position(${`:${itineraryId}:${alvo.nome}`.slice(0, 180)} in chave) > 0`.catch(() => { /* sem aviso para tirar */ })
   const nova = lerParadas(texto).paradas.filter(p => p.dia === dia)[alvo.indice]?.nome.replace(/\*/g, '') ?? ''
   log.info('atividade trocada', { phone, step: 'troca-atividade', data: { itineraryId, dia, de: alvo.nome.replace(/\*/g, ''), para: nova, motivo } })
   return { texto, nova }

@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { formatoDeConversa } from './formato'
 import { config } from '../config'
 import { log } from '../logger'
 
@@ -10,8 +11,10 @@ const metaClient = axios.create({
   },
 })
 
-export async function sendMessage(phone: string, text: string): Promise<void> {
+export async function sendMessage(phone: string, textoBruto: string): Promise<void> {
   const cleanPhone = phone.replace(/\D/g, '')
+  // No WhatsApp, "**negrito**" e "*   item" aparecem com asteriscos sobrando: vira o formato do WhatsApp
+  const text = formatoDeConversa(textoBruto)
   try {
     const res = await metaClient.post(`/${config.meta.phoneNumberId}/messages`, {
       messaging_product: 'whatsapp',

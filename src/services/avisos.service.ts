@@ -117,7 +117,7 @@ export async function avaliarAvisos(phone: string): Promise<void> {
           const l = await lerLugar(p.consulta && p.consulta.length > 3 ? p.consulta : `${p.nome}, ${destino}`, null, 'id,businessStatus,currentOpeningHours.periods').catch(() => null)
           const min = minutos(p.hora)
           const fechado = l && (l.estado === 'CLOSED_PERMANENTLY' || l.estado === 'CLOSED_TEMPORARILY' || (min !== null && abertoEm(l.periodosDaSemana, diaSemana, min) === false))
-          if (fechado) await criar(phone, { tipo: 'roteiro', nivel: 'atencao', chave: `roteiro:${hoje}:${it.id}:${p.nome}`, titulo: `${p.nome.replace(/\*/g, '')} pode estar fechado hoje`, texto: `Pelo Google Maps, esse lugar não abre hoje às ${p.hora}. Confirme antes de ir ou troque a atividade por outra.`, link: `/app/roteiro/atividade?id=${encodeURIComponent(it.id)}&d=${dia}&a=${p.indice}` })
+          if (fechado) await criar(phone, { tipo: 'roteiro', nivel: 'atencao', chave: `roteiro:${hoje}:${it.id}:${p.nome}`, titulo: `${p.nome.replace(/\*/g, '')}: não abre hoje às ${p.hora}`, texto: `Pelo Google Maps, esse lugar não está aberto hoje às ${p.hora}, horário da sua parada. Abra a atividade para trocar por outro lugar que esteja aberto.`, link: `/app/roteiro/atividade?id=${encodeURIComponent(it.id)}&d=${dia}&a=${p.indice}&fechado=1` })
         }
       }
     } catch { /* sem conferência: segue */ }
@@ -217,7 +217,8 @@ export async function enviarAvisosPendentes(): Promise<void> {
         order by (nivel = 'urgente') desc, (nivel = 'atencao') desc, criado_em asc limit ${restam}`
       for (const a of pendentes) {
         if (porPush) {
-          const chegou = await enviarPush(phone, { titulo: a.titulo, texto: a.texto, link: a.link && a.link.startsWith('/app') ? a.link : '/app', tag: `aviso-${a.id}` })
+          // O toque abre a tela do aviso; aviso com link de fora (INMET, fonte do evento) abre o Início com ele em destaque
+          const chegou = await enviarPush(phone, { titulo: a.titulo, texto: a.texto, link: a.link && a.link.startsWith('/app') ? a.link : `/app?aviso=a${a.id}`, tag: `aviso-${a.id}` })
           if (!chegou) break // inscrições vencidas: na próxima rodada cai no WhatsApp
           await prisma.$executeRaw`update public.sol_avisos set enviado_push_em = now() where id = ${a.id}`
         } else {

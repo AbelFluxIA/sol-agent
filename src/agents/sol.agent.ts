@@ -33,6 +33,7 @@ import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendI
 import { guardarExtras, lerExtras, montarContexto, type Transporte } from '../services/roteiro-contexto.service'
 import { conferirRoteiro, reforcarNegocios, cabeNoHorarioEscrito } from '../services/verificacao.service'
 import { avisosParaConversa } from '../services/avisos.service'
+import { formatoDeConversa } from '../services/formato'
 import { tirarEnchimento, ajustarHorarios, fecharTempos, garantirIdaParaEmbarque, cortarDepoisDaVolta, minutos as minutosDaHora, lerParadas as lerParadasDoTexto } from '../services/roteiro-texto'
 import { geocodeDestination } from '../services/weather.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
@@ -456,7 +457,7 @@ export async function processMessage(
   }
 
   // 6. Se é resposta de texto normal
-  const replyText = message?.content ? dedupeRepeatedMessage(message.content) : message?.content
+  const replyText = message?.content ? formatoDeConversa(dedupeRepeatedMessage(message.content)) : message?.content
   if (!replyText) {
     log.error('OpenAI retornou resposta vazia', new Error('empty response'), { phone })
     if (channel === 'app') return 'Tive um problema aqui. Tenta de novo?'

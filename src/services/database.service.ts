@@ -1,5 +1,6 @@
 // src/services/database.service.ts
 import { PrismaClient } from '@prisma/client'
+import { formatoDeConversa } from './formato'
 import { log } from '../logger'
 import { canalAtual, type Canal } from './canal.service'
 
@@ -172,7 +173,8 @@ export async function saveMessage(
     data: {
       conversationId: conversation.id,
       role,
-      content,
+      // resposta da Sol sempre no formato da conversa (sem Markdown sobrando), venha de qual agente vier
+      content: role === 'assistant' ? formatoDeConversa(content) : content,
       canal,
     },
   })

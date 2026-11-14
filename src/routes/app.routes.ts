@@ -1,4 +1,5 @@
 import express, { Router, Request, Response, NextFunction } from 'express'
+import { formatoDeConversa } from '../services/formato'
 import jwt from 'jsonwebtoken'
 import { getOrCreateConversation, getLatestItinerary, getAccountStats, getRecentMessages, updateConversation, resolvePhone, listItineraries, getItineraryForPhone, updateItinerary, phoneVariants } from '../services/database.service'
 import { sendWithTyping } from '../services/whatsapp.service'
@@ -302,7 +303,7 @@ router.post('/api/app/chat', clientAuthMiddleware, async (req: Request, res: Res
   try {
     cancelGuiaReminder(phone)
     const reply = await processMessage(phone, message.trim(), 'app')
-    res.json({ reply: reply ?? 'Tudo certo!' })
+    res.json({ reply: formatoDeConversa(reply ?? 'Tudo certo!') })
   } catch (err) {
     log.error('erro no chat do app', err, { phone, step: 'app-chat' })
     res.status(500).json({ error: 'Erro ao processar mensagem' })
@@ -327,7 +328,7 @@ router.post(
       if (!texto) { res.json({ texto: '', reply: 'Não consegui entender o áudio. Pode gravar de novo?' }); return }
       cancelGuiaReminder(phone)
       const reply = await processMessage(phone, texto, 'app')
-      res.json({ texto, reply: reply ?? 'Tudo certo!' })
+      res.json({ texto, reply: formatoDeConversa(reply ?? 'Tudo certo!') })
     } catch (err) {
       log.error('erro no áudio do app', err, { phone, step: 'app-audio' })
       res.status(500).json({ error: 'Erro ao processar o áudio' })

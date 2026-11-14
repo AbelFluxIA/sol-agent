@@ -4,6 +4,8 @@
 // A IA pode errar evento: só entram os que têm data dentro do período e link de fonte,
 // e quem mostra para a pessoa sempre mostra a fonte.
 import axios from 'axios'
+import { lookup } from 'dns/promises'
+import { isIP } from 'net'
 import prisma from './database.service'
 import { config } from '../config'
 import { log } from '../logger'
@@ -36,6 +38,53 @@ function lerJson(texto: string): any[] {
 
 const recente = async (cidade: string, de: string, ate: string) =>
   (await prisma.$queryRaw<{ n: number }[]>`select count(*)::int n from public.sol_eventos where cidade = ${cidade} and de = ${de}::date and ate = ${ate}::date and criado_em > now() - interval '3 hours'`)[0]?.n > 0
+
+// ─── A fonte do evento existe e fala dele? ───────────────────────────────────
+const semAcento = (t: string) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+const PALAVRAS_COMUNS = new Set(['evento', 'eventos', 'festival', 'festa', 'feira', 'show', 'shows', 'banda', 'etapa', 'edicao', 'circuito', 'apresenta', 'especial', 'noite', 'sobre', 'entre', 'brasil', 'cidade', 'centro', 'grande', 'encontro', 'semana', 'nacional', 'municipal', 'cultural'])
+
+// O endereço vem da IA: só abre site público (nunca endereço interno do servidor ou da rede)
+async function enderecoPublico(url: string): Promise<boolean> {
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
+    if (u.port && u.port !== '80' && u.port !== '443') return false
+    const ips = await lookup(u.hostname, { all: true })
+    return ips.length > 0 && ips.every(({ address }) => !isIP(address) ? false
+      : !/^(0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|::1$|::$|f[cd]|fe80|::ffff:)/i.test(address))
+  } catch { return false }
+}
+
+export async function fonteConfere(e: { titulo: string; fonte: string }, cidade: string): Promise<boolean> {
+  try {
+    let url = e.fonte
+    let r: any = null
+    // Segue os redirecionamentos à mão, conferindo cada endereço
+    for (let salto = 0; salto < 5; salto++) {
+      if (!(await enderecoPublico(url))) return false
+      r = await axios.get(url, {
+        timeout: 9000, maxRedirects: 0, responseType: 'text', maxContentLength: 3_000_000, validateStatus: () => true, transformResponse: (x) => x,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36', 'Accept-Language': 'pt-BR,pt;q=0.9', Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' },
+      })
+      const destino = r.status >= 300 && r.status < 400 ? String(r.headers?.location ?? '') : ''
+      if (!destino) break
+      url = new URL(destino, url).toString()
+      r = null
+    }
+    if (!r || r.status !== 200) return false
+    // Caiu na página de erro ou na página inicial do site: o evento não está lá
+    const caminho = new URL(url).pathname
+    if (/\/(404|erro|error|not-?found)\/?$/i.test(caminho) || (caminho.length <= 1 && new URL(e.fonte).pathname.length > 1)) return false
+    const html = semAcento(String(r.data ?? '').slice(0, 2_000_000))
+    const tituloDaPagina = html.match(/<title[^>]*>([^<]*)/)?.[1] ?? ''
+    if (/nao encontrad|not found|\b404\b|pagina inexistente|nao existe/.test(tituloDaPagina)) return false
+    // A página precisa citar o evento: pelo menos 2 palavras próprias do título (ou todas, se forem menos)
+    const daCidade = new Set(semAcento(cidade).split(/[^a-z0-9]+/))
+    const palavras = [...new Set(semAcento(e.titulo).split(/[^a-z0-9]+/).filter(p => p.length >= 5 && !PALAVRAS_COMUNS.has(p) && !daCidade.has(p)))]
+    if (!palavras.length) return true
+    return palavras.filter(p => html.includes(p)).length >= Math.min(2, palavras.length)
+  } catch { return false }
+}
 
 export async function eventosDaCidade(cidade: string, de: string, ate: string, phone?: string): Promise<Evento[]> {
   if (!cidade || !iso.test(de) || !iso.test(ate) || ate < de) return []
@@ -86,7 +135,7 @@ Responda SOMENTE com um array JSON, sem texto antes ou depois:
       .slice(0, 10)
     // A busca do Google às vezes devolve um endereço de passagem (vertexaisearch...), que vence em
     // poucos dias: troca pelo endereço de verdade da fonte. Se não der para descobrir, o evento sai.
-    const eventosComFonte = (await Promise.all(eventos.map(async (e) => {
+    const eventosComFonteBruta = (await Promise.all(eventos.map(async (e) => {
       if (!/vertexaisearch\.cloud\.google\.com|grounding-api-redirect/i.test(e.fonte)) return e
       try {
         const r2 = await axios.get(e.fonte, { maxRedirects: 0, timeout: 6000, validateStatus: s => s >= 200 && s < 400 })
@@ -94,10 +143,14 @@ Responda SOMENTE com um array JSON, sem texto antes ou depois:
         return /^https?:\/\//i.test(destino) && !/vertexaisearch/i.test(destino) ? { ...e, fonte: destino.slice(0, 400) } : null
       } catch { return null }
     }))).filter((e): e is Evento => !!e)
+    // A fonte precisa ABRIR e falar do evento: a IA às vezes inventa o endereço (visto em 14/11: link do
+    // Sympla com número inventado, que dava "página não encontrada"). Evento sem fonte que confere não entra.
+    const conferidos = await Promise.all(eventosComFonteBruta.map(async (e) => ((await fonteConfere(e, cidade)) ? e : null)))
+    const eventosComFonte = conferidos.filter((e): e is Evento => !!e)
     await prisma.$executeRaw`
       insert into public.sol_eventos (cidade, de, ate, eventos) values (${chave}, ${de}::date, ${ate}::date, ${JSON.stringify(eventosComFonte)}::jsonb)
       on conflict (cidade, de, ate) do update set eventos = excluded.eventos, criado_em = now()`
-    log.info('eventos da cidade buscados', { phone, step: 'eventos', data: { cidade, de, ate, achados: eventosComFonte.length, semFonteReal: eventos.length - eventosComFonte.length } })
+    log.info('eventos da cidade buscados', { phone, step: 'eventos', data: { cidade, de, ate, achados: eventosComFonte.length, semFonteReal: eventos.length - eventosComFonteBruta.length, fonteNaoConfere: eventosComFonteBruta.length - eventosComFonte.length } })
     return eventosComFonte
   } catch (err) {
     log.warn('busca de eventos falhou', { phone, step: 'eventos', data: { cidade, error: (err as Error).message } })

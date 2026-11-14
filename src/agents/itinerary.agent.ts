@@ -249,6 +249,8 @@ Gere o roteiro completo formatado para WhatsApp.
           }
         }
         text = limparIntroducao(text)
+        // Suposição escrita entre parênteses ("(Assumindo Aeroporto Santos Dumont...)") não vai para a pessoa
+        text = text.replace(/[ \t]*\((?:assumindo|supondo|presumindo|considerando que)[^)\n]*\)/gi, '')
         // Roteiro incompleto (faltam dias ou quase não tem paradas) não é aceito: tenta de novo
         const { dias: diasNoTexto, paradas: paradasNoTexto } = lerParadas(text)
         if (diasNoTexto < datasEsperadas || paradasNoTexto.length < Math.max(1, datasEsperadas)) {
