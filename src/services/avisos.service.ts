@@ -10,6 +10,7 @@ import { eventosDaCidade } from './eventos.service'
 import { lerLugar, abertoEm, podeConsultarGoogle } from './verificacao.service'
 import { lerParadas, ehLogistica, minutos } from './roteiro-texto'
 import { sendHuman } from './whatsapp.service'
+import { alertasInmet } from './inmet.service'
 import { config } from '../config'
 import { log } from '../logger'
 
@@ -19,7 +20,8 @@ export interface Aviso { id: string; origem: 'equipe' | 'sol'; tipo: string; niv
 export const normalizarCidade = (s: string | null | undefined) =>
   (s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().split(/\s*[-,/]\s*/)[0].replace(/\s+/g, ' ').trim()
 const hojeBR = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
-const horaBR = () => { const [h, m] = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false }).split(':').map(Number); return h * 60 + m }
+// Minutos desde a meia-noite em Brasília. (hourCycle h23 e o resto por 24: sem isso, meia-noite vinha como "24" e o resumo da manhã saía de madrugada.)
+const horaBR = () => { const [h, m] = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).split(':').map(Number); return (h % 24) * 60 + m }
 const fimDoDia = () => new Date(`${hojeBR()}T23:59:59-03:00`)
 
 // ─── Comunicados da equipe ───────────────────────────────────────────────────
@@ -63,20 +65,41 @@ export async function avaliarAvisos(phone: string): Promise<void> {
     const destino = conv.destination
     const cidade = destino.split(/\s*-\s*/)[0]
 
-    // 1. Tempo ruim hoje (previsão que a Sol já consulta)
+    // 1. Alerta oficial do INMET em vigor para a cidade (texto do próprio INMET)
+    let temAlertaOficial = false
+    let tempoHoje = ''
+    try {
+      for (const a of await alertasInmet(destino)) {
+        temAlertaOficial = true
+        const grave = /grande perigo|^perigo$/i.test(a.severidade.trim())
+        await criar(phone, {
+          tipo: 'clima', nivel: grave ? 'urgente' : 'atencao', chave: `inmet:${hoje}:${a.id}`,
+          titulo: `Alerta do INMET para ${cidade}: ${a.descricao} (${a.severidade})`,
+          texto: `${a.risco}${a.risco && !/[.!]$/.test(a.risco) ? '.' : ''} ${a.instrucao}`.trim().slice(0, 470) + ` Válido até ${a.fim.slice(11, 16) || 'o fim do dia'}. Fonte: INMET.`,
+          link: 'https://alertas2.inmet.gov.br',
+        })
+      }
+    } catch { /* INMET fora do ar: segue com a previsão */ }
+
+    // 1b. Sem alerta oficial: tempo ruim hoje pela previsão que a Sol já consulta
     try {
       const c = await geocodeDestination(destino)
       const w = await getWeatherData(hoje, hoje, c)
       const codigo = Number((w as any)?.daily?.weather_code?.[0] ?? 0)
       const mm = Number((w as any)?.daily?.precipitation_sum?.[0] ?? 0)
       const prob = Number((w as any)?.daily?.precipitation_probability_max?.[0] ?? 0)
-      if ([95, 96, 99].includes(codigo)) await criar(phone, { tipo: 'clima', nivel: 'urgente', chave: `clima:${hoje}:tempestade`, titulo: `Tempestade prevista hoje em ${cidade}`, texto: 'Há previsão de tempestade com raios. Prefira programas cobertos e evite praia, trilha e áreas abertas. No seu roteiro, as paradas ao ar livre têm a opção "Se chover".', link: '/app/hoje' })
-      else if (mm >= 20 || (mm >= 10 && prob >= 70)) await criar(phone, { tipo: 'clima', nivel: 'atencao', chave: `clima:${hoje}:chuva`, titulo: `Chuva forte hoje em ${cidade}`, texto: 'A previsão é de chuva forte hoje. Leve guarda-chuva e veja no roteiro a opção "Se chover" das paradas ao ar livre. Se quiser, troque a atividade por uma coberta.', link: '/app/hoje' })
+      tempoHoje = [95, 96, 99].includes(codigo) ? 'tempestade prevista' : mm >= 20 ? 'chuva forte' : mm >= 3 ? 'chuva em parte do dia' : mm > 0.2 ? 'possibilidade de garoa' : codigo <= 2 ? 'tempo firme' : 'tempo nublado, sem chuva'
+      if (!temAlertaOficial) {
+        if ([95, 96, 99].includes(codigo)) await criar(phone, { tipo: 'clima', nivel: 'urgente', chave: `clima:${hoje}:tempestade`, titulo: `Tempestade prevista hoje em ${cidade}`, texto: 'Há previsão de tempestade com raios. Prefira programas cobertos e evite praia, trilha e áreas abertas. No seu roteiro, as paradas ao ar livre têm a opção "Se chover".', link: '/app/hoje' })
+        else if (mm >= 20 || (mm >= 10 && prob >= 70)) await criar(phone, { tipo: 'clima', nivel: 'atencao', chave: `clima:${hoje}:chuva`, titulo: `Chuva forte hoje em ${cidade}`, texto: 'A previsão é de chuva forte hoje. Leve guarda-chuva e veja no roteiro a opção "Se chover" das paradas ao ar livre. Se quiser, troque a atividade por uma coberta.', link: '/app/hoje' })
+      }
     } catch { /* sem previsão: segue */ }
 
     // 2. Eventos de hoje na cidade (com fonte)
+    let eventosHoje = 0
     try {
       const eventos = (await eventosDaCidade(destino, hoje, hoje, phone)).slice(0, 2)
+      eventosHoje = eventos.length
       for (const e of eventos) await criar(phone, { tipo: 'evento', nivel: 'info', chave: `evento:${hoje}:${e.titulo}`, titulo: `Hoje em ${cidade}: ${e.titulo}`, texto: [e.hora ? `Às ${e.hora}` : null, e.local ? `em ${e.local}` : null, e.preco, e.resumo].filter(Boolean).join(' · ').replace(/[.\s]+$/, '') + '. Confirme na fonte antes de ir.', link: e.fonte })
     } catch { /* sem eventos: segue */ }
 
@@ -97,6 +120,26 @@ export async function avaliarAvisos(phone: string): Promise<void> {
         }
       }
     } catch { /* sem conferência: segue */ }
+
+    // 4. Resumo da manhã (uma vez por dia de viagem): tempo, primeira parada e o que há hoje
+    try {
+      // Só de manhã (7h às 11h59): "bom dia" à tarde ou à noite não faz sentido
+      if (horaBR() >= 7 * 60 && horaBR() < 12 * 60) {
+        const it = await getLatestItinerary(phone)
+        let roteiro = ''
+        if (it?.rawItinerary && it.arrivalDate && it.arrivalDate <= hoje && (it.departureDate ?? it.arrivalDate) >= hoje) {
+          const dia = Math.round((Date.parse(`${hoje}T12:00:00Z`) - Date.parse(`${it.arrivalDate}T12:00:00Z`)) / 86400000)
+          const doDia = lerParadas(it.rawItinerary).paradas.filter(p => p.dia === dia && !ehLogistica(p.nome))
+          if (doDia.length) roteiro = `Seu roteiro de hoje tem ${doDia.length} ${doDia.length === 1 ? 'parada' : 'paradas'}; a primeira é ${doDia[0].nome.replace(/\*/g, '')}, às ${doDia[0].hora}.`
+        }
+        const partes = [
+          tempoHoje ? `Tempo hoje: ${tempoHoje}${temAlertaOficial ? ' (há alerta do INMET, veja o aviso)' : ''}.` : null,
+          roteiro || 'Você não tem paradas no roteiro para hoje.',
+          eventosHoje ? `Achei ${eventosHoje} ${eventosHoje === 1 ? 'evento' : 'eventos'} hoje na cidade (veja os avisos).` : null,
+        ].filter(Boolean)
+        await criar(phone, { tipo: 'resumo', nivel: 'info', chave: `resumo:${hoje}`, titulo: `Bom dia! Seu dia em ${cidade}`, texto: partes.join(' '), link: '/app/hoje' })
+      }
+    } catch { /* sem resumo: segue */ }
   } catch (err) {
     log.warn('avaliação de avisos falhou', { phone, step: 'avisos', data: { error: (err as Error).message } })
   }

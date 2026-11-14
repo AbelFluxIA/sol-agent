@@ -156,6 +156,61 @@ Sem comentários antes ou depois.`
   return novo.join('\n')
 }
 
+// Perfil de NEGÓCIOS: a IA tende a encher o dia de passeio turístico mesmo com a instrução.
+// Esta segunda passada mostra as paradas numeradas e pede a troca das turísticas do horário
+// comercial por lugares de negócios de verdade, até dar pelo menos metade. Roda ANTES da
+// conferência no Google Maps, então o que entrar aqui também é conferido.
+export async function reforcarNegocios(texto: string, destino: string, datas: string[], phone?: string, itineraryId?: string): Promise<string> {
+  try {
+    const { linhas, paradas } = lerParadas(texto)
+    const diurnas = paradas.filter(p => !ehLogistica(p.nome) && (minutos(p.hora) ?? 0) >= 7 * 60 && (minutos(p.hora) ?? 0) < 18 * 60)
+    if (diurnas.length < 2) return texto
+    const lista = diurnas.map((p, i) => `${i + 1}. Dia ${p.dia + 1} (${datas[Math.min(p.dia, datas.length - 1)] ?? ''}), ${p.hora}: ${p.nome.replace(/\*/g, '')}`).join('\n')
+    const prompt = `Roteiro em ${destino} para uma pessoa em VIAGEM DE NEGÓCIOS. Paradas do horário comercial (7h às 18h):
+${lista}
+
+Regra: em cada dia, pelo menos METADE dessas paradas (sem contar restaurantes de almoço) precisa ser de negócios de verdade: coworking, hub de inovação, parque tecnológico, centro de convenções, associação ou entidade empresarial (Sebrae, federação das indústrias, associação comercial), universidade com área de negócios, café bom para trabalhar ou fazer reunião, ou evento do setor nessas datas.
+Praia, mirante, museu, igreja, praça, feira de artesanato e passeio turístico NÃO contam.
+
+Se a regra já está cumprida, responda só: OK
+Se não, troque o MENOR número de paradas turísticas necessário por lugares de negócios REAIS em ${destino} (confirme no Google Search que existem e abrem nesse dia e horário; use o NOME OFICIAL do Google Maps). Mantenha os restaurantes de almoço.
+Responda SOMENTE com os blocos novos, cada um começando com "### número" (o número da parada na lista acima), no mesmo formato do roteiro:
+
+### 2
+[emoji] *[Período] ([mesmo horário]):* *[Nome do lugar de negócios]*
+🚗 *~X min* de carro do [local anterior]
+🕒 *Horário:* [funcionamento nesse dia] · *Tempo no local:* ~[duração]
+💰 *Custo:* [Grátis | faixa por pessoa | diária do coworking]
+💬 [por que serve para quem está a trabalho: o que dá para fazer lá]
+📍 https://www.google.com/maps/search/?api=1&query=Nome+Do+Lugar+${destino.replace(/\s+/g, '+')}
+
+Sem comentários antes ou depois.`
+    const resposta = await perguntarAoGemini(prompt, { callType: 'reforco_negocios', phone, itineraryId, maxTokens: 3500, temperatura: 0.4, timeoutMs: 70_000 })
+    if (/^\s*OK\s*$/i.test(resposta.trim())) return texto
+    const blocos = new Map<number, string[]>()
+    let n = 0
+    for (const l of resposta.split('\n')) {
+      const m = l.match(/^###\s*(\d+)\s*$/)
+      if (m) { n = Number(m[1]); blocos.set(n, []); continue }
+      if (n && blocos.has(n)) blocos.get(n)!.push(l)
+    }
+    const novo = [...linhas]
+    let trocadas = 0
+    // De trás para frente, para as posições das linhas não mudarem
+    for (let i = diurnas.length - 1; i >= 0; i--) {
+      const b = (blocos.get(i + 1) ?? []).join('\n').trim().split('\n')
+      if (b.length < 2 || lerParadas(`DIA 1\n${b.join('\n')}`).paradas.length !== 1) continue
+      novo.splice(diurnas[i].inicio, diurnas[i].fim - diurnas[i].inicio, ...b)
+      trocadas++
+    }
+    log.info('roteiro de negócios reforçado', { phone, step: 'verificacao', data: { paradasDiurnas: diurnas.length, trocadas } })
+    return trocadas ? novo.join('\n') : texto
+  } catch (err) {
+    log.warn('reforço de negócios falhou', { phone, step: 'verificacao', data: { error: (err as Error).message } })
+    return texto
+  }
+}
+
 // Tempo de deslocamento pela distância real entre duas paradas (estimativa nossa)
 function deslocamento(km: number): string {
   if (km < 0.9) return `*~${Math.max(2, Math.round(km * 13) + 1)} min* a pé (${Math.max(50, Math.round(km * 20) * 50)} m)`

@@ -31,7 +31,7 @@ import {
 import prisma from '../services/database.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { guardarExtras, lerExtras, montarContexto, type Transporte } from '../services/roteiro-contexto.service'
-import { conferirRoteiro } from '../services/verificacao.service'
+import { conferirRoteiro, reforcarNegocios } from '../services/verificacao.service'
 import { avisosParaConversa } from '../services/avisos.service'
 import { geocodeDestination } from '../services/weather.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
@@ -966,8 +966,10 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     const datasDaViagem: string[] = []
     for (let d = new Date(`${arrivalDate}T12:00:00Z`); d <= new Date(`${departureDate}T12:00:00Z`) && datasDaViagem.length < 16; d = new Date(d.getTime() + 86400000)) datasDaViagem.push(d.toISOString().slice(0, 10))
     const centro = await geocodeDestination(dest).then(c => ({ lat: c.lat, lng: c.lon })).catch(() => null)
+    // Viagem de negócios: garante que o horário comercial tem lugares de negócios de verdade
+    const textoBase = /turista de neg[oó]cios/i.test(touristProfile || '') ? await log.timed(phone, 'reforco-negocios', () => reforcarNegocios(textoBruto, dest, datasDaViagem, phone, latestIt?.id)) : textoBruto
     const conferido = await log.timed(phone, 'conferencia-google', () =>
-      conferirRoteiro(textoBruto, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem })
+      conferirRoteiro(textoBase, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem })
     )
     const itineraryText = conferido.texto
 

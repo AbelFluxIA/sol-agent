@@ -49,7 +49,7 @@ async function buscar(pos: { lat: number; lng: number }, tipos: string[], raio: 
 
 export async function pertoDeMim(phone: string, pos: { lat: number; lng: number }, perfil: string, evitar: string[] = []): Promise<LugarPerto[] | null> {
   if (!config.googlePlaces.apiKey || !podeConsultarGoogle()) return null
-  const hora = Number(new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', hour12: false }).slice(0, 2))
+  const hora = Number(new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', hourCycle: 'h23' }).slice(0, 2)) % 24
   const doPerfil = POR_PERFIL.filter(([re]) => re.test(perfil)).flatMap(([, t]) => t)
   const tipos = [...new Set([...daHora(hora), ...(doPerfil.length ? doPerfil : BASICOS)])].slice(0, 14)
   let lugares: any[]

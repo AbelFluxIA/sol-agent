@@ -8,7 +8,7 @@ import { log } from './logger'
 import routes from './routes'
 import appRoutes from './routes/app.routes'
 import prisma from './services/database.service'
-import { startDailyJobs } from './jobs/daily'
+import { startDailyJobs, startAvisosDaGuia } from './jobs/daily'
 import { expirarGuiasDeCredito } from './services/indicacao.service'
 import { waitForActiveOperations, operacoesAtivas } from './shutdown'
 import adminRoutes from './routes/admin.routes'
@@ -122,6 +122,7 @@ async function bootstrap() {
     // ninguém receber mensagem em dobro.
     if (process.env.DISABLE_DAILY_JOBS === 'true') log.info('envios agendados desligados (DISABLE_DAILY_JOBS)', { step: 'bootstrap' })
     else startDailyJobs()
+    startAvisosDaGuia()
 
     // Guia ganha por indicação tem prazo: confere de hora em hora (não envia mensagens)
     setInterval(() => { expirarGuiasDeCredito().catch(err => log.error('erro ao encerrar guias de crédito', err, { step: 'indicacao' })) }, 3600_000).unref()

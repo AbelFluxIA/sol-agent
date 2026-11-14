@@ -16,7 +16,7 @@ function arquivoDaUrl(url: string | null | undefined): { bucket: string; caminho
   return m ? { bucket: m[1], caminho: decodeURIComponent(m[2].split('?')[0]) } : null
 }
 
-async function apagarArquivos(urls: (string | null | undefined)[]): Promise<number> {
+export async function apagarArquivos(urls: (string | null | undefined)[]): Promise<number> {
   const porBucket = new Map<string, string[]>()
   for (const u of urls) {
     const a = arquivoDaUrl(u)

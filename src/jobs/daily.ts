@@ -114,6 +114,15 @@ async function jobInactivityPing() {
   }
 }
 
+// Avisos da Guia (resumo da manhã, alerta do INMET, evento, parada fechada) pelo WhatsApp.
+// Separado dos envios diários: o bot antigo não tem este envio, então não há mensagem em dobro.
+// A própria função respeita 8h–21h, 3 por dia e a janela de 24 h do WhatsApp. AVISOS_WHATSAPP=false desliga.
+export function startAvisosDaGuia() {
+  if (process.env.AVISOS_WHATSAPP === 'false' || process.env.MODO_CARGA === '1') { log.info('avisos da Guia pelo WhatsApp desligados', { step: 'bootstrap' }); return }
+  setInterval(() => { enviarAvisosPendentes().catch(err => log.error('job avisos da guia falhou', err, {})) }, 30 * 60 * 1000).unref()
+  log.info('avisos da Guia pelo WhatsApp ligados (a cada 30 min, 8h–21h, até 3 por dia por pessoa)', { step: 'bootstrap' })
+}
+
 export function startDailyJobs() {
   // 3h da manhã: desativa companions de quem já voltou
   scheduleDailyAt(3, 0, 'deactivate-companions', jobDeactivateCompanions)
@@ -124,9 +133,6 @@ export function startDailyJobs() {
   // Pings de inatividade — 10h e 16h (só pinga quem ficou 6h+ sem responder)
   scheduleDailyAt(10, 30, 'inactivity-ping-10h', jobInactivityPing)
   scheduleDailyAt(16, 0, 'inactivity-ping-16h', jobInactivityPing)
-
-  // Avisos da Guia pelo WhatsApp: a cada 30 min (a própria função respeita 8h–21h, 3 por dia e a janela de 24 h)
-  setInterval(() => { enviarAvisosPendentes().catch(err => log.error('job avisos da guia falhou', err, {})) }, 30 * 60 * 1000).unref()
 
   log.info('jobs diários agendados (3h, 8h, 10h e pings 10h30/16h)', {})
 }

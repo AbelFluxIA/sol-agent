@@ -6,6 +6,7 @@ import { perguntarAoGemini } from './gemini'
 import { lerParadas } from './roteiro-texto'
 import { conferirRoteiro } from './verificacao.service'
 import { geocodeDestination } from './weather.service'
+import { generatePdf } from './pdf.service'
 import { log } from '../logger'
 
 const MOTIVOS: Record<string, string> = {
@@ -83,9 +84,38 @@ Responda SOMENTE com o bloco novo, sem comentários.`
   await updateItinerary(itineraryId, { rawItinerary: texto })
   // Cópia usada pelo link público do roteiro (/r/código)
   if (it.pdfUrl) await prisma.$executeRaw`update public.generated_itineraries set text_content = ${texto} where pdf_url = ${it.pdfUrl}`.catch(() => { /* sem cópia pública */ })
+  agendarPdfNovo(phone, itineraryId)
   const nova = lerParadas(texto).paradas.filter(p => p.dia === dia)[alvo.indice]?.nome.replace(/\*/g, '') ?? ''
   log.info('atividade trocada', { phone, step: 'troca-atividade', data: { itineraryId, dia, de: alvo.nome.replace(/\*/g, ''), para: nova, motivo } })
   return { texto, nova }
+}
+
+// Depois de uma troca o PDF fica desatualizado: refaz em segundo plano. Espera 90 s (a pessoa
+// pode trocar mais de uma atividade em seguida) e refaz uma vez só. O link público antigo
+// (/r/código) continua valendo e passa a apontar para o PDF novo.
+const pdfsAgendados = new Map<string, NodeJS.Timeout>()
+function agendarPdfNovo(phone: string, itineraryId: string): void {
+  if (process.env.MODO_CARGA === '1') return
+  clearTimeout(pdfsAgendados.get(itineraryId))
+  pdfsAgendados.set(itineraryId, setTimeout(() => {
+    pdfsAgendados.delete(itineraryId)
+    refazerPdf(phone, itineraryId).catch(err => log.warn('não refez o PDF depois da troca', { phone, step: 'troca-atividade', data: { error: (err as Error).message } }))
+  }, 90_000))
+}
+export async function refazerPdf(phone: string, itineraryId: string): Promise<string | null> {
+  const it = await getItineraryForPhone(phone, itineraryId)
+  if (!it?.rawItinerary || !it.pdfUrl) return null
+  const conv = await getOrCreateConversation(phone)
+  const antigo = it.pdfUrl
+  const { pdfUrl, shareCode } = await generatePdf({ travelerName: conv.name || 'Viajante', destination: it.destination || conv.destination || 'sua viagem', itineraryText: it.rawItinerary, phone })
+  if (!pdfUrl || pdfUrl === antigo) return null
+  // A linha antiga (com o código do link que a pessoa já tem) passa a apontar para o PDF novo; a linha nova, duplicada, sai
+  const atualizadas = await prisma.$executeRaw`update public.generated_itineraries set pdf_url = ${pdfUrl}, text_content = ${it.rawItinerary} where pdf_url = ${antigo}`
+  if (atualizadas && shareCode) await prisma.$executeRaw`delete from public.generated_itineraries where share_code = ${shareCode}::uuid`
+  await updateItinerary(itineraryId, { pdfUrl })
+  // O arquivo antigo fica: mensagens já enviadas no WhatsApp apontam para ele
+  log.info('PDF refeito depois da troca de atividade', { phone, step: 'troca-atividade', data: { itineraryId } })
+  return pdfUrl
 }
 
 export async function avaliarAtividade(phone: string, itineraryId: string | null, atividade: string, nota: 1 | -1 | 0): Promise<void> {
