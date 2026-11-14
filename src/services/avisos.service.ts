@@ -11,6 +11,7 @@ import { lerLugar, abertoEm, podeConsultarGoogle } from './verificacao.service'
 import { lerParadas, ehLogistica, minutos } from './roteiro-texto'
 import { sendHuman } from './whatsapp.service'
 import { alertasInmet } from './inmet.service'
+import { enviarPush, temPush } from './push.service'
 import { config } from '../config'
 import { log } from '../logger'
 
@@ -187,7 +188,11 @@ export async function avisosParaConversa(phone: string): Promise<string> {
   } catch { return '' }
 }
 
-// ─── Envio pelo WhatsApp (job de 30 em 30 min; só roda com os envios agendados ligados) ──
+// ─── Envio ao celular (a cada 30 min) ────────────────────────────────────────
+// Para cada pessoa em viagem com a Guia: avalia as regras e manda o que ainda não foi.
+// Quem ligou as notificações do app recebe por lá (sem custo e sem a janela de 24 h);
+// quem não ligou recebe pelo WhatsApp, só com a conversa aberta nas últimas 24 h.
+// Nos dois casos: no máximo 3 por dia, das 8h às 21h, urgentes primeiro.
 export async function enviarAvisosPendentes(): Promise<void> {
   const hora = Math.floor(horaBR() / 60)
   if (hora < 8 || hora >= 21) return // horário de silêncio
@@ -195,21 +200,32 @@ export async function enviarAvisosPendentes(): Promise<void> {
   for (const { phone } of ativos) {
     try {
       await avaliarAvisos(phone)
-      const ultima = await getLastUserMessageAt(phone)
-      // Fora da janela de 24 h o WhatsApp só aceita mensagem modelo: o aviso fica só no app
-      if (!ultima || Date.now() - ultima.getTime() > 23 * 3600_000) continue
-      const [{ n }] = await prisma.$queryRaw<{ n: number }[]>`select count(*)::int n from public.sol_avisos where phone = ${phone} and enviado_whatsapp_em > (now() at time zone 'America/Sao_Paulo')::date at time zone 'America/Sao_Paulo'`
+      const porPush = await temPush(phone)
+      if (!porPush) {
+        const ultima = await getLastUserMessageAt(phone)
+        // Fora da janela de 24 h o WhatsApp só aceita mensagem modelo: o aviso fica só no app
+        if (!ultima || Date.now() - ultima.getTime() > 23 * 3600_000) continue
+      }
+      const [{ n }] = await prisma.$queryRaw<{ n: number }[]>`
+        select count(*)::int n from public.sol_avisos where phone = ${phone}
+          and greatest(coalesce(enviado_whatsapp_em, 'epoch'), coalesce(enviado_push_em, 'epoch')) > (now() at time zone 'America/Sao_Paulo')::date at time zone 'America/Sao_Paulo'`
       let restam = Math.max(0, 3 - n)
       if (!restam) continue
-      const pendentes = await prisma.$queryRaw<{ id: number; nivel: Nivel; titulo: string; texto: string; link: string | null }[]>`
-        select id::int as id, nivel, titulo, texto, link from public.sol_avisos
-        where phone = ${phone} and tipo <> 'comunicado-lido' and enviado_whatsapp_em is null and lido_em is null and (valido_ate is null or valido_ate > now())
+      const pendentes = await prisma.$queryRaw<{ id: number; tipo: string; nivel: Nivel; titulo: string; texto: string; link: string | null }[]>`
+        select id::int as id, tipo, nivel, titulo, texto, link from public.sol_avisos
+        where phone = ${phone} and tipo <> 'comunicado-lido' and enviado_whatsapp_em is null and enviado_push_em is null and lido_em is null and (valido_ate is null or valido_ate > now())
         order by (nivel = 'urgente') desc, (nivel = 'atencao') desc, criado_em asc limit ${restam}`
       for (const a of pendentes) {
-        const link = a.link ? (/^https?:/.test(a.link) ? a.link : `${config.appPublicUrl}${a.link}`) : ''
-        await sendHuman(phone, `${a.nivel === 'info' ? '🔔' : '⚠️'} *${a.titulo}*\n${a.texto}${link ? `\n${link}` : ''}`)
-        await prisma.$executeRaw`update public.sol_avisos set enviado_whatsapp_em = now() where id = ${a.id}`
-        log.info('aviso enviado pelo WhatsApp', { phone, step: 'avisos', data: { id: a.id, nivel: a.nivel } })
+        if (porPush) {
+          const chegou = await enviarPush(phone, { titulo: a.titulo, texto: a.texto, link: a.link && a.link.startsWith('/app') ? a.link : '/app', tag: `aviso-${a.id}` })
+          if (!chegou) break // inscrições vencidas: na próxima rodada cai no WhatsApp
+          await prisma.$executeRaw`update public.sol_avisos set enviado_push_em = now() where id = ${a.id}`
+        } else {
+          const link = a.link ? (/^https?:/.test(a.link) ? a.link : `${config.appPublicUrl}${a.link}`) : ''
+          await sendHuman(phone, `${a.nivel === 'info' ? '🔔' : '⚠️'} *${a.titulo}*\n${a.texto}${link ? `\n${link}` : ''}`)
+          await prisma.$executeRaw`update public.sol_avisos set enviado_whatsapp_em = now() where id = ${a.id}`
+        }
+        log.info('aviso enviado ao celular', { phone, step: 'avisos', data: { id: a.id, nivel: a.nivel, tipo: a.tipo, por: porPush ? 'push' : 'whatsapp' } })
         restam--
       }
     } catch (err) {

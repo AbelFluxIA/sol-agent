@@ -80,6 +80,7 @@ export async function excluirConta(phone: string): Promise<ResumoExclusao> {
   await prisma.$executeRaw`delete from public.sol_resgates_guia where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_avaliacoes where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_avisos where phone = ${phone}`
+  await prisma.$executeRaw`delete from public.sol_push where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_indicacoes where convidado_phone = ${phone} or indicador_phone = ${phone}`
 
   // 4. Conversa (leva junto mensagens e roteiros) e custos sem o telefone

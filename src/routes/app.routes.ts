@@ -16,6 +16,7 @@ import { trocarAtividade, avaliarAtividade, avaliacoesDoRoteiro, MOTIVOS_DE_TROC
 import { lerLugar, podeConsultarGoogle } from '../services/verificacao.service'
 import { pertoDeMim } from '../services/perto.service'
 import { avisosPara, dispensarAviso } from '../services/avisos.service'
+import { pushLigado, chavePublica, inscricaoValida, inscrever, sair, enviarPush } from '../services/push.service'
 import { nomesDasParadas } from '../services/roteiro-texto'
 import {
   consentimentos, registrarConsentimento, registrarPresenca, lerCadastro, salvarCadastro, roteirosDaSemana,
@@ -532,6 +533,39 @@ router.post('/api/app/avisos/lido', clientAuthMiddleware, async (req: Request, r
   try { await dispensarAviso(phone, id); res.json({ ok: true }) } catch (err) {
     log.error('erro ao dispensar aviso', err, { phone, step: 'avisos' })
     res.status(500).json({ error: 'Não consegui salvar agora' })
+  }
+})
+
+// ─── Notificações do app (PWA) ───────────────────────────────────────────────
+// Chave pública para o navegador se inscrever, e guarda/retira a inscrição do aparelho
+router.get('/api/app/push/chave', clientAuthMiddleware, (_req: Request, res: Response) => {
+  if (!pushLigado()) { res.status(204).end(); return }
+  res.json({ chave: chavePublica() })
+})
+router.post('/api/app/push/inscrever', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  if (!pushLigado()) { res.status(503).json({ error: 'Notificações indisponíveis' }); return }
+  const s = req.body?.inscricao
+  if (!inscricaoValida(s)) { res.status(400).json({ error: 'Inscrição inválida' }); return }
+  if (excedeu('push-inscrever', phone, 10, 3600_000)) { res.status(429).json({ error: 'Espere um pouco.' }); return }
+  try {
+    await inscrever(phone, s, String(req.headers['user-agent'] || ''))
+    log.info('notificações do app ligadas', { phone, step: 'push' })
+    // Confirma na hora que funciona (e a pessoa vê como é o aviso)
+    if (req.body?.testar === true) await enviarPush(phone, { titulo: 'Avisos da Sol ligados', texto: 'É assim que os avisos da sua viagem vão chegar.', link: '/app', tag: 'teste' })
+    res.json({ ok: true })
+  } catch (err) {
+    log.error('erro ao ligar notificações', err, { phone, step: 'push' })
+    res.status(500).json({ error: 'Não consegui ligar agora' })
+  }
+})
+router.post('/api/app/push/sair', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint.slice(0, 1000) : ''
+  if (!endpoint) { res.status(400).json({ error: 'Informe o aparelho' }); return }
+  try { await sair(phone, endpoint); res.json({ ok: true }) } catch (err) {
+    log.error('erro ao desligar notificações', err, { phone, step: 'push' })
+    res.status(500).json({ error: 'Não consegui desligar agora' })
   }
 })
 
