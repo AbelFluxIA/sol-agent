@@ -28,14 +28,25 @@ function cleanDestinationForGeocode(destination: string): string {
   return destination.replace(/\s*-\s*[^-]+$/, '').trim() || destination.trim()
 }
 
+const ESTADOS: Record<string, string> = { AC: 'Acre', AL: 'Alagoas', AP: 'Amapá', AM: 'Amazonas', BA: 'Bahia', CE: 'Ceará', DF: 'Distrito Federal', ES: 'Espírito Santo', GO: 'Goiás', MA: 'Maranhão', MT: 'Mato Grosso', MS: 'Mato Grosso do Sul', MG: 'Minas Gerais', PA: 'Pará', PB: 'Paraíba', PR: 'Paraná', PE: 'Pernambuco', PI: 'Piauí', RJ: 'Rio de Janeiro', RN: 'Rio Grande do Norte', RS: 'Rio Grande do Sul', RO: 'Rondônia', RR: 'Roraima', SC: 'Santa Catarina', SP: 'São Paulo', SE: 'Sergipe', TO: 'Tocantins' }
+const semAcento = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim()
+
+// Há muitas cidades com o mesmo nome (Bonito existe em MS, PE, BA, PA e na Itália). O que vem
+// depois do " - " decide: sigla de estado brasileiro ou nome do país. Sem isso a primeira da
+// lista era usada, e o roteiro de Bonito - MS saía com o clima e o mapa de Bonito, na Itália (14/11).
 export async function geocodeDestination(destination: string): Promise<Coordinates> {
   const query = cleanDestinationForGeocode(destination)
+  const sufixo = destination.match(/\s[-,]\s*([^-,]+)\s*$/)?.[1]?.trim() ?? ''
+  const uf = /^[A-Za-z]{2}$/.test(sufixo) && ESTADOS[sufixo.toUpperCase()] ? sufixo.toUpperCase() : ''
   return withRetry(async () => {
     const { data } = await axios.get('https://geocoding-api.open-meteo.com/v1/search', {
-      params: { name: query, count: 1, language: 'pt', format: 'json' },
+      params: { name: query, count: 10, language: 'pt', format: 'json', ...(uf ? { countryCode: 'BR' } : {}) },
       timeout: OPEN_METEO_TIMEOUT,
     })
-    const result = data?.results?.[0]
+    const lista: any[] = data?.results ?? []
+    const result = (uf
+      ? lista.find(r => semAcento(String(r.admin1 ?? '')) === semAcento(ESTADOS[uf])) ?? lista.find(r => r.country_code === 'BR')
+      : sufixo ? lista.find(r => semAcento(String(r.country ?? '')) === semAcento(sufixo)) : null) ?? lista[0]
     if (!result) throw new Error(`Destino "${query}" não encontrado para geocodificação`)
     log.info('geocodificado', { step: 'geocode', data: { query, lat: result.latitude, lon: result.longitude } })
     return { lat: result.latitude, lon: result.longitude }

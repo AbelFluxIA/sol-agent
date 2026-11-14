@@ -5,6 +5,7 @@ import { log } from '../logger'
 import { buildItinerarySystemPrompt, buildDaysClassifierPrompt } from '../prompts/sol.prompts'
 import { WeatherData, MarineData, VALID_DAYS, ValidDays } from '../types'
 import type { ContextoRoteiro } from '../services/roteiro-contexto.service'
+import { lerParadas, limparIntroducao } from '../services/roteiro-texto'
 import { getDaysOfWeek } from '../services/weather.service'
 import { logApiUsage } from '../services/usage.service'
 
@@ -102,6 +103,8 @@ export async function generateItineraryText(params: GenerateItineraryParams): Pr
   } = params
 
   const daysOfWeek = getDaysOfWeek(arrivalDate, departureDate)
+  // Quantas datas o roteiro precisa cobrir (chegada e volta contam)
+  const datasEsperadas = Math.max(1, Math.min(16, Math.round((Date.parse(`${departureDate}T12:00:00Z`) - Date.parse(`${arrivalDate}T12:00:00Z`)) / 86400000) + 1) || 1)
   const hasMonday = daysOfWeek.includes('Segunda')
 
   // Instrução para o último dia, conforme o transporte de volta INFORMADO.
@@ -226,12 +229,33 @@ Gere o roteiro completo formatado para WhatsApp.
           {
             contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
             tools: [{ google_search: {} }],
-            generationConfig: { temperature: 0.7, maxOutputTokens: 16000 },
+            // Espaço proporcional ao tamanho da viagem (um roteiro de 6 datas não cabia em 16 mil)
+            generationConfig: { temperature: 0.7, maxOutputTokens: Math.min(40000, 10000 + 4000 * datasEsperadas) },
           },
           { timeout: 240_000 }
         )
-        const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text
+        // A resposta vem em PEDAÇOS (parts) quando a IA usa a busca: junta todos. Antes só o primeiro
+        // era lido, e às vezes o roteiro salvo era só a saudação, sem nenhum dia (visto em 14/11).
+        let text: string = (response.data?.candidates?.[0]?.content?.parts ?? []).filter((p: any) => !p?.thought).map((p: any) => p?.text ?? '').join('')
         if (!text) throw new Error('Gemini não retornou texto no roteiro')
+        // Os pedaços às vezes trazem o roteiro DUAS vezes (visto em 14/11: 4 dias numa viagem de 2 datas):
+        // corta onde começa o dia que passa do número de datas da viagem
+        {
+          const ls = text.split('\n')
+          const cabecalhos = ls.map((l, i) => (/^\W*DIA\s*\d+/i.test(l.replace(/\*/g, '').trim()) ? i : -1)).filter(i => i >= 0)
+          if (cabecalhos.length > datasEsperadas) {
+            log.warn('roteiro veio repetido, ficando com a primeira cópia', { phone, step: 'gemini-generate', data: { dias: cabecalhos.length, esperados: datasEsperadas } })
+            text = ls.slice(0, cabecalhos[datasEsperadas]).join('\n').replace(/\s+$/, '')
+          }
+        }
+        text = limparIntroducao(text)
+        // Roteiro incompleto (faltam dias ou quase não tem paradas) não é aceito: tenta de novo
+        const { dias: diasNoTexto, paradas: paradasNoTexto } = lerParadas(text)
+        if (diasNoTexto < datasEsperadas || paradasNoTexto.length < Math.max(1, datasEsperadas)) {
+          lastError = new Error(`roteiro incompleto: ${diasNoTexto} de ${datasEsperadas} dias, ${paradasNoTexto.length} paradas (${response.data?.candidates?.[0]?.finishReason ?? 'sem motivo'})`)
+          log.warn('roteiro veio incompleto, gerando de novo', { phone, step: 'gemini-generate', durationMs: Date.now() - start, data: { model, attempt, chars: text.length, dias: diasNoTexto, esperados: datasEsperadas, fim: response.data?.candidates?.[0]?.finishReason } })
+          continue
+        }
         log.info('gemini concluiu', { step: 'gemini-generate', durationMs: Date.now() - start, data: { model, chars: text.length } })
 
         const usage = response.data?.usageMetadata

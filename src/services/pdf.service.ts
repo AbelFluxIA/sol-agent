@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { config } from '../config'
 import { log } from '../logger'
+import { gerarPdfLocal } from './pdf-local.service'
 
 interface GeneratePdfParams {
   travelerName: string
@@ -16,6 +17,17 @@ interface PdfResult {
 
 export async function generatePdf(params: GeneratePdfParams): Promise<PdfResult> {
   const { travelerName, destination, itineraryText, phone } = params
+
+  // PDF feito aqui no servidor (formato novo, links que abrem). Se o texto não tiver paradas
+  // reconhecíveis ou algo falhar, segue para a função antiga do Supabase. PDF_LOCAL=false desliga.
+  if (process.env.PDF_LOCAL !== 'false' && process.env.MODO_CARGA !== '1') {
+    try {
+      const local = await gerarPdfLocal({ travelerName, destination, itineraryText, phone })
+      if (local) return local
+    } catch (err) {
+      log.warn('pdf no servidor falhou, usando a função antiga', { step: 'generate-pdf', data: { error: (err as Error).message } })
+    }
+  }
 
   const response = await axios.post(
     `${config.supabase.url}/functions/v1/generate-pdf`,

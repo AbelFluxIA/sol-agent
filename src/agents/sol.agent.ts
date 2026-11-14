@@ -31,8 +31,9 @@ import {
 import prisma from '../services/database.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { guardarExtras, lerExtras, montarContexto, type Transporte } from '../services/roteiro-contexto.service'
-import { conferirRoteiro, reforcarNegocios } from '../services/verificacao.service'
+import { conferirRoteiro, reforcarNegocios, cabeNoHorarioEscrito } from '../services/verificacao.service'
 import { avisosParaConversa } from '../services/avisos.service'
+import { tirarEnchimento, ajustarHorarios, fecharTempos, garantirIdaParaEmbarque, cortarDepoisDaVolta, minutos as minutosDaHora, lerParadas as lerParadasDoTexto } from '../services/roteiro-texto'
 import { geocodeDestination } from '../services/weather.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
@@ -966,12 +967,30 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     const datasDaViagem: string[] = []
     for (let d = new Date(`${arrivalDate}T12:00:00Z`); d <= new Date(`${departureDate}T12:00:00Z`) && datasDaViagem.length < 16; d = new Date(d.getTime() + 86400000)) datasDaViagem.push(d.toISOString().slice(0, 10))
     const centro = await geocodeDestination(dest).then(c => ({ lat: c.lat, lng: c.lon })).catch(() => null)
+    // Limpeza que não depende da IA: sai o que não é programa (check-in, tempo livre...) e a parada
+    // marcada para antes de o lugar abrir vai para a hora da abertura
+    const semEnchimento = tirarEnchimento(textoBruto)
+    const chegadaMin = arrivalTime ? minutosDaHora(arrivalTime) : null
+    const comAbertura = ajustarHorarios(semEnchimento.texto, chegadaMin)
+    const semDepois = cortarDepoisDaVolta(comAbertura.texto, transportMode, departureTime)
+    if (semDepois.tiradas.length) semEnchimento.tiradas.push(...semDepois.tiradas.map(x => `${x}: depois da hora de voltar`))
+    const comEmbarque = garantirIdaParaEmbarque(semDepois.texto, transportMode, departureTime)
+    const acertado = { texto: comEmbarque.texto, ajustes: comAbertura.ajustes }
+    if (semEnchimento.tiradas.length || acertado.ajustes.length || comEmbarque.incluida) log.info('roteiro ajustado depois de gerar', { phone, step: 'verificacao', data: { tiradas: semEnchimento.tiradas, horarios: acertado.ajustes, idaParaEmbarque: comEmbarque.incluida } })
     // Viagem de negócios: garante que o horário comercial tem lugares de negócios de verdade
-    const textoBase = /turista de neg[oó]cios/i.test(touristProfile || '') ? await log.timed(phone, 'reforco-negocios', () => reforcarNegocios(textoBruto, dest, datasDaViagem, phone, latestIt?.id)) : textoBruto
+    const textoBase = /turista de neg[oó]cios/i.test(touristProfile || '') ? await log.timed(phone, 'reforco-negocios', () => reforcarNegocios(acertado.texto, dest, datasDaViagem, phone, latestIt?.id)) : acertado.texto
     const conferido = await log.timed(phone, 'conferencia-google', () =>
-      conferirRoteiro(textoBase, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem })
+      conferirRoteiro(textoBase, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem, chegadaMin })
     )
-    const itineraryText = conferido.texto
+    // Por último (os trajetos já são os reais): o tempo no local não pode atropelar a próxima parada
+    const tempos = fecharTempos(conferido.texto, cabeNoHorarioEscrito)
+    if (tempos.ajustes.length) log.info('tempos no local encurtados para caber', { phone, step: 'verificacao', data: { ajustes: tempos.ajustes } })
+    // Trava de segurança: os ajustes nunca podem mudar o número de dias. Se mudou (bloco da IA fora do
+    // formato), vale o texto de antes da conferência, que tem a estrutura certa.
+    const diasEsperados = lerParadasDoTexto(textoBruto).dias
+    const estruturaOk = lerParadasDoTexto(tempos.texto).dias === diasEsperados
+    if (!estruturaOk) log.error('ajustes mudaram o número de dias do roteiro; usando o texto anterior à conferência', new Error('estrutura do roteiro'), { phone, step: 'verificacao', data: { esperados: diasEsperados, vieram: lerParadasDoTexto(tempos.texto).dias } })
+    const itineraryText = estruturaOk ? tempos.texto : acertado.texto
 
     // Salva texto no banco para a Sol Guia usar como contexto
     if (latestIt) {
