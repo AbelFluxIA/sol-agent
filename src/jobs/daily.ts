@@ -2,6 +2,7 @@ import { deactivateExpiredCompanions, getTomorrowArrivals, getYesterdayDeparture
 import { sendWithTyping, sendHuman } from '../services/whatsapp.service'
 import { buildPreTripMessage, buildPostTripSurveyMessage } from '../prompts/sol.prompts'
 import { log } from '../logger'
+import { enviarAvisosPendentes } from '../services/avisos.service'
 
 // Frases de ping — variadas para não repetir sempre a mesma
 const INACTIVITY_PINGS = [
@@ -123,6 +124,9 @@ export function startDailyJobs() {
   // Pings de inatividade — 10h e 16h (só pinga quem ficou 6h+ sem responder)
   scheduleDailyAt(10, 30, 'inactivity-ping-10h', jobInactivityPing)
   scheduleDailyAt(16, 0, 'inactivity-ping-16h', jobInactivityPing)
+
+  // Avisos da Guia pelo WhatsApp: a cada 30 min (a própria função respeita 8h–21h, 3 por dia e a janela de 24 h)
+  setInterval(() => { enviarAvisosPendentes().catch(err => log.error('job avisos da guia falhou', err, {})) }, 30 * 60 * 1000).unref()
 
   log.info('jobs diários agendados (3h, 8h, 10h e pings 10h30/16h)', {})
 }

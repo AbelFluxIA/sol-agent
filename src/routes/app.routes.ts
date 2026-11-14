@@ -14,6 +14,9 @@ import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.servi
 import { fotoDoLocal, fotosLigadas } from '../services/fotos-lugar.service'
 import { trocarAtividade, avaliarAtividade, avaliacoesDoRoteiro, MOTIVOS_DE_TROCA } from '../services/troca.service'
 import { lerLugar, podeConsultarGoogle } from '../services/verificacao.service'
+import { pertoDeMim } from '../services/perto.service'
+import { avisosPara, dispensarAviso } from '../services/avisos.service'
+import { nomesDasParadas } from '../services/roteiro-texto'
 import {
   consentimentos, registrarConsentimento, registrarPresenca, lerCadastro, salvarCadastro, roteirosDaSemana,
   TIPOS_CONSENTIMENTO, type TipoConsentimento,
@@ -479,6 +482,56 @@ router.get('/api/app/local-info', clientAuthMiddleware, async (req: Request, res
   } catch (err) {
     log.warn('informação do local falhou', { phone, step: 'local-info', data: { error: (err as Error).message, status: (err as any)?.response?.status } })
     res.status(204).end()
+  }
+})
+
+// ─── GET /api/app/perto ──────────────────────────────────────────────────────
+// "Perto de você agora" (Guia Sol): lugares abertos perto da pessoa, pelo perfil e pela hora.
+// Direto do Google Maps, na hora, sem guardar. Sem a Guia responde 403 (o app mostra o cadeado).
+router.get('/api/app/perto', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const lat = Number(req.query.lat), lng = Number(req.query.lng)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) { res.status(400).json({ error: 'Informe a posição' }); return }
+  try {
+    const conv = await getOrCreateConversation(phone)
+    if (!conv.hasCompanion) { res.status(403).json({ error: 'Recurso da Guia Sol', motivo: 'sem_guia' }); return }
+    if (!podeHoje('perto', phone, 24)) { res.status(429).json({ error: 'Muitas consultas por hoje. Pergunte à Sol na conversa.' }); return }
+    // Não repete o que já está no roteiro de hoje
+    const it = await getLatestItinerary(phone)
+    const evitar = it?.rawItinerary ? nomesDasParadas(it.rawItinerary) : []
+    const cad = await lerCadastro(phone).catch(() => null)
+    const perfil = [conv.touristProfile, conv.groupType, ...(cad?.gostos ?? [])].filter(Boolean).join(', ')
+    const lugares = await pertoDeMim(phone, { lat, lng }, perfil, evitar)
+    if (!lugares) { res.status(204).end(); return }
+    res.set('Cache-Control', 'private, no-store').json({ lugares })
+  } catch (err) {
+    log.warn('perto de você falhou', { phone, step: 'perto', data: { error: (err as Error).message, status: (err as any)?.response?.status } })
+    res.status(204).end()
+  }
+})
+
+// ─── GET /api/app/avisos ─────────────────────────────────────────────────────
+// Comunicados da equipe (para a cidade da viagem ou onde a pessoa está) e avisos
+// automáticos da Guia (tempo ruim hoje, evento hoje, parada do roteiro fechada).
+router.get('/api/app/avisos', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const cidade = typeof req.query.cidade === 'string' ? req.query.cidade.trim().slice(0, 80) : null
+  try {
+    res.set('Cache-Control', 'private, no-store').json({ avisos: await avisosPara(phone, cidade) })
+  } catch (err) {
+    log.error('erro ao listar avisos', err, { phone, step: 'avisos' })
+    res.json({ avisos: [] })
+  }
+})
+
+// A pessoa dispensou um aviso
+router.post('/api/app/avisos/lido', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const id = typeof req.body?.id === 'string' ? req.body.id.slice(0, 20) : ''
+  if (!/^[ac]\d+$/.test(id)) { res.status(400).json({ error: 'Informe o aviso' }); return }
+  try { await dispensarAviso(phone, id); res.json({ ok: true }) } catch (err) {
+    log.error('erro ao dispensar aviso', err, { phone, step: 'avisos' })
+    res.status(500).json({ error: 'Não consegui salvar agora' })
   }
 })
 

@@ -84,11 +84,21 @@ Responda SOMENTE com um array JSON, sem texto antes ou depois:
       })
       .filter((e): e is Evento => !!e)
       .slice(0, 10)
+    // A busca do Google às vezes devolve um endereço de passagem (vertexaisearch...), que vence em
+    // poucos dias: troca pelo endereço de verdade da fonte. Se não der para descobrir, o evento sai.
+    const eventosComFonte = (await Promise.all(eventos.map(async (e) => {
+      if (!/vertexaisearch\.cloud\.google\.com|grounding-api-redirect/i.test(e.fonte)) return e
+      try {
+        const r2 = await axios.get(e.fonte, { maxRedirects: 0, timeout: 6000, validateStatus: s => s >= 200 && s < 400 })
+        const destino = String(r2.headers?.location ?? '')
+        return /^https?:\/\//i.test(destino) && !/vertexaisearch/i.test(destino) ? { ...e, fonte: destino.slice(0, 400) } : null
+      } catch { return null }
+    }))).filter((e): e is Evento => !!e)
     await prisma.$executeRaw`
-      insert into public.sol_eventos (cidade, de, ate, eventos) values (${chave}, ${de}::date, ${ate}::date, ${JSON.stringify(eventos)}::jsonb)
+      insert into public.sol_eventos (cidade, de, ate, eventos) values (${chave}, ${de}::date, ${ate}::date, ${JSON.stringify(eventosComFonte)}::jsonb)
       on conflict (cidade, de, ate) do update set eventos = excluded.eventos, criado_em = now()`
-    log.info('eventos da cidade buscados', { phone, step: 'eventos', data: { cidade, de, ate, achados: eventos.length } })
-    return eventos
+    log.info('eventos da cidade buscados', { phone, step: 'eventos', data: { cidade, de, ate, achados: eventosComFonte.length, semFonteReal: eventos.length - eventosComFonte.length } })
+    return eventosComFonte
   } catch (err) {
     log.warn('busca de eventos falhou', { phone, step: 'eventos', data: { cidade, error: (err as Error).message } })
     return []

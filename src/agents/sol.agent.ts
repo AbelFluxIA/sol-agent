@@ -32,6 +32,7 @@ import prisma from '../services/database.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { guardarExtras, lerExtras, montarContexto, type Transporte } from '../services/roteiro-contexto.service'
 import { conferirRoteiro } from '../services/verificacao.service'
+import { avisosParaConversa } from '../services/avisos.service'
 import { geocodeDestination } from '../services/weather.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
@@ -293,8 +294,11 @@ async function buildProfileContext(phone: string, conversation: { name: string |
     if (cad.gostos.length) parts.push(`Gostos informados no cadastro: ${cad.gostos.join(', ')}.`)
   } catch { /* cadastro indisponível: segue sem */ }
 
-  if (parts.length === 0) return ''
-  return `\n\n[PERFIL DO CLIENTE — cliente recorrente. Use isso para não repetir perguntas já respondidas e cumprimentar de forma personalizada:\n${parts.join('\n')}]`
+  // Comunicados da equipe e avisos automáticos ativos: a Sol sabe deles e pode mencionar
+  const avisos = await avisosParaConversa(phone)
+
+  if (parts.length === 0) return avisos
+  return `${avisos}\n\n[PERFIL DO CLIENTE — cliente recorrente. Use isso para não repetir perguntas já respondidas e cumprimentar de forma personalizada:\n${parts.join('\n')}]`
 }
 
 // Detecta tentativas de prompt injection / jailbreak antes de enviar ao modelo

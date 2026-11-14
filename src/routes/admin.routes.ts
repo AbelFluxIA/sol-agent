@@ -14,6 +14,7 @@ import { config } from '../config'
 import { estadoDosLogs, resumoDasRotas, atrasoDoProcesso, iniciadoEm, ultimoWebhook } from '../services/logs.service'
 import { operacoesAtivas } from '../shutdown'
 import { filaDeRoteiros } from '../services/fila.service'
+import { criarComunicado, listarComunicados, encerrarComunicado } from '../services/avisos.service'
 import { arquivosAgora } from '../middleware/limites'
 
 const router = Router()
@@ -301,6 +302,31 @@ router.get(`${A}/roteiro`, adminAppAuth, async (req: Request, res: Response) => 
     registrar(req, 'roteiro visto', r.conversation.phone, { id })
     res.json({ id: r.id, destino: r.destination, chegada: r.arrivalDate, saida: r.departureDate, dias: r.days, status: r.status, criadoEm: r.createdAt, pdfUrl: r.pdfUrl, texto: r.rawItinerary, phone: r.conversation.phone, nome: r.conversation.name })
   } catch (err) { erro(res, err, 'roteiro') }
+})
+
+// ─── Comunicados da equipe (aparecem no app e a Sol passa a saber deles na conversa) ──
+router.get(`${A}/comunicados`, adminAppAuth, async (req: Request, res: Response) => {
+  try { res.json({ comunicados: await listarComunicados() }) } catch (err) { erro(res, err, 'comunicados') }
+})
+
+router.post(`${A}/comunicados`, adminAppAuth, async (req: Request, res: Response) => {
+  const b = req.body ?? {}
+  const titulo = txt(b.titulo, 100), texto = txt(b.texto, 500), cidade = txt(b.cidade, 80), link = txt(b.link, 300)
+  const nivel = (['info', 'atencao', 'urgente'] as const).find(n => n === b.nivel) ?? 'info'
+  const horas = inteiro(b.horas, 24, 1, 24 * 30)
+  if (titulo.length < 3 || texto.length < 5) { res.status(400).json({ error: 'Escreva o título e o texto do comunicado' }); return }
+  if (link && !/^https:\/\//i.test(link)) { res.status(400).json({ error: 'O link precisa começar com https://' }); return }
+  try {
+    const c = await criarComunicado({ titulo, texto, nivel, cidade: cidade || null, link: link || null, horas, por: quem(req) })
+    registrar(req, 'comunicado criado', undefined, { id: c.id, nivel, cidade: cidade || 'todos', horas })
+    res.json({ ok: true, comunicado: c })
+  } catch (err) { erro(res, err, 'comunicado') }
+})
+
+router.post(`${A}/comunicados/encerrar`, adminAppAuth, async (req: Request, res: Response) => {
+  const id = inteiro(req.body?.id, 0, 0, Number.MAX_SAFE_INTEGER)
+  if (!id) { res.status(400).json({ error: 'Informe o comunicado' }); return }
+  try { await encerrarComunicado(id); registrar(req, 'comunicado encerrado', undefined, { id }); res.json({ ok: true }) } catch (err) { erro(res, err, 'comunicado') }
 })
 
 export default router

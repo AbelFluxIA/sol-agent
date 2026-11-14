@@ -49,7 +49,7 @@ export function abertoEm(periodos: Periodo[] | undefined, diaSemana: number, min
   return false
 }
 
-export interface DadosDoLugar { id: string; estado?: string; ponto: Ponto | null; periodos?: Periodo[]; abertoAgora?: boolean; horarios?: string[]; nota?: number; avaliacoes?: number; mapsUrl?: string }
+export interface DadosDoLugar { id: string; estado?: string; ponto: Ponto | null; periodos?: Periodo[]; periodosDaSemana?: Periodo[]; abertoAgora?: boolean; horarios?: string[]; nota?: number; avaliacoes?: number; mapsUrl?: string }
 // Lê o lugar no Google. Dados de uso imediato: NÃO gravar (regra do Google).
 export async function lerLugar(texto: string, perto: Ponto | null, campos = 'id,businessStatus,location,regularOpeningHours.periods,rating,userRatingCount'): Promise<DadosDoLugar | null> {
   const id = await placeId(texto, perto)
@@ -60,6 +60,7 @@ export async function lerLugar(texto: string, perto: Ponto | null, campos = 'id,
     estado: data?.businessStatus,
     ponto: data?.location ? { lat: data.location.latitude, lng: data.location.longitude } : null,
     periodos: data?.regularOpeningHours?.periods,
+    periodosDaSemana: data?.currentOpeningHours?.periods, // horário desta semana (já com feriado e horário especial)
     abertoAgora: data?.currentOpeningHours?.openNow ?? data?.regularOpeningHours?.openNow,
     horarios: data?.currentOpeningHours?.weekdayDescriptions ?? data?.regularOpeningHours?.weekdayDescriptions,
     nota: data?.rating,
