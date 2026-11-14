@@ -417,6 +417,10 @@ Regras da estrutura:
 - Não encha o roteiro: "compras de lembrancinhas", "tempo livre", "descanso", "check-in" e "check-out" NÃO são paradas. Traslado só entra se o transporte de volta foi informado.
 - Os interesses do pedido mandam: se o primeiro interesse é Negócios, a maior parte das paradas do dia é de negócios (coworkings, hubs, centros de convenções, cafés para trabalhar, eventos do setor), e praia ou passeio turístico entra só no fim do dia. NUNCA force a ligação de um lugar com um interesse (proibido "um toque de negócios", "combina com cultura pela importância..."): se o lugar não é daquele tipo, escolha outro.
 - O roteiro vai até o horário de volta informado. Não termine o dia horas antes sem motivo.
+- HORÁRIO QUE CABE: cada parada começa dentro do funcionamento do lugar, ANTES da última entrada e pelo menos 1 hora antes de fechar. Parque que fecha às 17h com última entrada às 16h não pode ser visitado às 17h: ponha de manhã ou no começo da tarde. Atrativo principal da cidade vai no melhor horário do dia, não espremido no fim.
+- TODOS os interesses do pedido aparecem: cada interesse marcado tem pelo menos uma parada (ex.: marcou Aventura, há pelo menos uma atividade de aventura de verdade).
+- Centro de convenções, hotel ou espaço de eventos só entra se houver um evento confirmado ali naquele dia e horário (da lista de eventos). Nunca mande a pessoa "conhecer" um centro de convenções vazio.
+- Sábado, domingo e feriado: lugares de negócios costumam fechar. Use só os que abrem de verdade nesse dia e complete com os outros interesses do pedido; diga isso em uma frase na introdução.
 - Não repita lugares que a pessoa já fez (lista nos dados) e priorize os que ela disse que quer conhecer.
 - Se houver EVENTOS NAS DATAS nos dados, inclua no máximo 2 que combinem com o perfil, como parada normal no dia e horário do evento, com uma linha extra antes do 📍:
 🎫 *Evento:* [nome do evento, data e hora]. Fonte: [endereço da fonte que veio nos dados]

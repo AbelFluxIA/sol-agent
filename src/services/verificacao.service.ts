@@ -77,7 +77,7 @@ const distanciaKm = (a: Ponto, b: Ponto) => {
 }
 
 async function conferir(texto: string, destino: string, datas: string[], centro: Ponto | null, soDia?: number): Promise<Conferencia[]> {
-  const { paradas } = lerParadas(texto)
+  const { paradas, linhas } = lerParadas(texto)
   const alvo = paradas.filter(p => !ehLogistica(p.nome) && (soDia === undefined || p.dia === soDia)).slice(0, 24)
   const saida: Conferencia[] = []
   // 4 por vez: rápido sem estourar o limite por segundo do Google
@@ -100,6 +100,8 @@ async function conferir(texto: string, destino: string, datas: string[], centro:
           else if (typeof l.nota === 'number' && l.nota < 3.7 && (l.avaliacoes ?? 0) >= 40) estado = 'mal-avaliado'
           else if (aberto === null && l.nota === undefined) estado = 'sem-dados'
         }
+        // Mesmo aberto no Google: o horário escrito no próprio roteiro precisa comportar a visita
+        if ((estado === 'ok' || estado === 'sem-dados') && !cabeNoHorarioEscrito(linhas.slice(p.inicio, p.fim), p.hora)) estado = 'fechado-no-horario'
         saida.push({ parada: p, estado, ponto: l.ponto })
       } catch (err) {
         saida.push({ parada: p, estado: 'sem-dados', ponto: null })
@@ -109,10 +111,28 @@ async function conferir(texto: string, destino: string, datas: string[], centro:
   return saida.sort((a, b) => a.parada.inicio - b.parada.inicio)
 }
 
+// O horário da parada cabe no funcionamento que o próprio roteiro escreveu na linha 🕒?
+// Pega casos que o Google não pega: "Cataratas às 17:00" com "08:00 às 17:00 (última entrada às 16:00)".
+// Devolve false só quando há certeza (faixas de hora legíveis e a parada fora delas ou sem 45 min úteis).
+export function cabeNoHorarioEscrito(linhasDoBloco: string[], hora: string): boolean {
+  const inicio = minutos(hora)
+  const linha = linhasDoBloco.find(l => l.trim().startsWith('🕒'))
+  if (inicio === null || !linha) return true
+  const txt = linha.replace(/\*/g, '').split(/Tempo no local/i)[0]
+  if (/24\s*h|24 horas|sempre aberto|livre acesso/i.test(txt)) return true
+  const hm = (h: string, m?: string) => Number(h) * 60 + Number(m ?? 0)
+  const ultima = txt.match(/[úu]ltima entrada[^\d]{0,12}(\d{1,2})[:h](\d{2})?/i)
+  if (ultima && inicio >= hm(ultima[1], ultima[2])) return false
+  const faixas = [...txt.matchAll(/(\d{1,2})[:h](\d{2})?\s*(?:às|as|a|até|-|–)\s*(\d{1,2})[:h](\d{2})?/gi)].map(m => ({ de: hm(m[1], m[2]), ate: hm(m[3], m[4]) })).filter(f => f.de < 1440 && f.ate <= 1440)
+  if (!faixas.length) return true
+  // Dentro de alguma faixa e com pelo menos 45 min antes de fechar (faixa que vira a meia-noite: até < de)
+  return faixas.some(f => (f.ate > f.de ? inicio >= f.de && inicio + 45 <= f.ate : inicio >= f.de || inicio + 45 <= f.ate))
+}
+
 const MOTIVO: Record<string, string> = {
   'nao-encontrado': 'o lugar não foi encontrado no Google Maps com esse nome (pode não existir ou ter outro nome)',
   fechado: 'o lugar está fechado (temporária ou definitivamente)',
-  'fechado-no-horario': 'o lugar está FECHADO nesse dia da semana e horário',
+  'fechado-no-horario': 'o lugar está FECHADO nesse dia da semana e horário, ou a parada começa depois da última entrada ou a menos de 45 minutos do fechamento',
   'mal-avaliado': 'o lugar é mal avaliado pelos visitantes',
 }
 
@@ -121,13 +141,14 @@ async function reparar(texto: string, ruins: Conferencia[], destino: string, per
   const { linhas } = lerParadas(texto)
   const lista = ruins.map((c, i) => `${i + 1}. "${c.parada.nome}" (dia ${c.parada.dia + 1}, ${datas[Math.min(c.parada.dia, datas.length - 1)] ?? ''}, ${c.parada.periodo} ${c.parada.hora}): ${MOTIVO[c.estado]}.\nBloco atual:\n${linhas.slice(c.parada.inicio, c.parada.fim).join('\n')}`).join('\n\n')
   const prompt = `Você revisa um roteiro de viagem em ${destino}. Perfil da pessoa: ${perfil}.
-As paradas abaixo foram REPROVADAS na conferência do Google Maps. Para CADA uma, escolha outro lugar REAL, do mesmo tipo (restaurante por restaurante, atração por atração), perto, ABERTO nesse dia da semana e horário (confirme no Google Search) e bem avaliado. Use o NOME OFICIAL do lugar como aparece no Google Maps.
+As paradas abaixo foram REPROVADAS na conferência. Para CADA uma, escolha OUTRO lugar REAL (não o mesmo lugar com outro nome nem outra entrada do mesmo atrativo), do mesmo tipo (restaurante por restaurante, atração por atração), perto, ABERTO nesse dia da semana e horário (confirme no Google Search) e bem avaliado. Use o NOME OFICIAL do lugar como aparece no Google Maps.
 
 ${lista}
 
 ROTEIRO COMPLETO (para não repetir lugares que já estão nele):
 ${texto.slice(0, 9000)}
 
+Na linha 🕒 escreva o funcionamento real desse dia; a parada precisa começar dentro dele, antes da última entrada e pelo menos 1 hora antes de fechar.
 Responda SOMENTE com os blocos novos, um para cada parada reprovada, nesta forma exata (mesmas linhas e emojis do bloco atual, mesmo período e horário):
 ### 1
 [bloco completo da parada nova]
@@ -163,13 +184,16 @@ Sem comentários antes ou depois.`
 export async function reforcarNegocios(texto: string, destino: string, datas: string[], phone?: string, itineraryId?: string): Promise<string> {
   try {
     const { linhas, paradas } = lerParadas(texto)
-    const diurnas = paradas.filter(p => !ehLogistica(p.nome) && (minutos(p.hora) ?? 0) >= 7 * 60 && (minutos(p.hora) ?? 0) < 18 * 60)
+    // Só em dia útil: no sábado e no domingo os lugares de negócios fecham, e forçar a troca piora o roteiro
+    const diaUtil = (dia: number) => { const d = datas[Math.min(dia, datas.length - 1)]; const s = d ? new Date(`${d}T12:00:00Z`).getUTCDay() : 1; return s >= 1 && s <= 5 }
+    const diurnas = paradas.filter(p => diaUtil(p.dia) && !ehLogistica(p.nome) && (minutos(p.hora) ?? 0) >= 7 * 60 && (minutos(p.hora) ?? 0) < 18 * 60)
     if (diurnas.length < 2) return texto
     const lista = diurnas.map((p, i) => `${i + 1}. Dia ${p.dia + 1} (${datas[Math.min(p.dia, datas.length - 1)] ?? ''}), ${p.hora}: ${p.nome.replace(/\*/g, '')}`).join('\n')
     const prompt = `Roteiro em ${destino} para uma pessoa em VIAGEM DE NEGÓCIOS. Paradas do horário comercial (7h às 18h):
 ${lista}
 
-Regra: em cada dia, pelo menos METADE dessas paradas (sem contar restaurantes de almoço) precisa ser de negócios de verdade: coworking, hub de inovação, parque tecnológico, centro de convenções, associação ou entidade empresarial (Sebrae, federação das indústrias, associação comercial), universidade com área de negócios, café bom para trabalhar ou fazer reunião, ou evento do setor nessas datas.
+Regra: em cada dia, pelo menos METADE dessas paradas (sem contar restaurantes de almoço) precisa ser de negócios de verdade: coworking, hub de inovação, parque tecnológico, associação ou entidade empresarial com atendimento ao público (Sebrae, federação das indústrias, associação comercial), universidade com área de negócios, café bom para trabalhar ou fazer reunião, ou um EVENTO do setor confirmado nessa data e horário.
+Centro de convenções, hotel ou espaço de eventos SÓ conta se houver um evento confirmado ali nesse dia e horário: "visitar" um centro de convenções vazio não é programa.
 Praia, mirante, museu, igreja, praça, feira de artesanato e passeio turístico NÃO contam.
 
 Se a regra já está cumprida, responda só: OK
@@ -237,7 +261,13 @@ function anotar(texto: string, conf: Conferencia[], saida?: { ponto: Ponto; rotu
       const km = distanciaKm(anterior!.ponto, c.ponto)
       const linha = `🚗 ${deslocamento(km)} de ${anterior!.parada.nome.replace(/\*/g, '')}`
       const k = bloco.findIndex(l => l.trim().startsWith('🚗'))
-      if (k >= 0) bloco[k] = linha; else bloco.splice(1, 0, linha)
+      // Parque nacional, praia e orla têm o "ponto" do mapa no meio da área, longe da entrada: a conta
+      // dava 69 km entre as Cataratas e o Parque das Aves, que ficam lado a lado. Quando a distância
+      // calculada passa de 25 km e é mais que o triplo do tempo que a IA estimou, fica a estimativa da IA.
+      const estimado = k >= 0 ? Number(bloco[k].match(/~\s*(\d+)\s*min/)?.[1] ?? NaN) : NaN
+      const calculado = Math.round((km / (km > 15 ? 45 : 24)) * 60 + 4)
+      const desconfiar = km > 25 && Number.isFinite(estimado) && calculado > estimado * 3
+      if (!desconfiar) { if (k >= 0) bloco[k] = linha; else bloco.splice(1, 0, linha) }
     } else if (!mesmoDia && saida && c.ponto && p.indice === 0) {
       // Primeira parada do dia: distância real desde a hospedagem ou a posição da pessoa
       const linha = `🚗 ${deslocamento(distanciaKm(saida.ponto, c.ponto))} ${saida.rotulo}`
@@ -297,7 +327,8 @@ export async function conferirRoteiro(texto: string, o: { destino: string; datas
       const h = await lerLugar(`${o.hospedagem}, ${o.destino}`, o.centro, 'id,location').catch(() => null)
       if (h?.ponto && (!o.centro || distanciaKm(o.centro, h.ponto) < 80)) saida = { ponto: h.ponto, rotulo: 'da sua hospedagem' }
     }
-    if (!saida && o.partida) saida = { ponto: o.partida, rotulo: 'de onde você está' }
+    // Posição do celular: só se a pessoa já está no destino (até 80 km do centro)
+    if (!saida && o.partida && o.centro && distanciaKm(o.centro, o.partida) <= 80) saida = { ponto: o.partida, rotulo: 'de onde você está' }
     const final = anotar(atual, conf, saida)
     const r = { texto: final, paradas: conf.length, ok: conf.filter(c => c.estado === 'ok').length, trocadas, semConferir: conf.filter(c => c.estado !== 'ok').length, consultas: consultasHoje - antes }
     log.info('roteiro conferido no Google Maps', { phone: o.phone, step: 'verificacao', data: { ...r, texto: undefined, reprovadasAntes: ruins.map(x => `${x.parada.nome}: ${x.estado}`) } })

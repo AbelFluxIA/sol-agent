@@ -6,6 +6,7 @@ import prisma, { conversaPorTelefone } from './database.service'
 import { lerCadastro } from './presenca.service'
 import { eventosDaCidade, type Evento } from './eventos.service'
 import { nomesDasParadas } from './roteiro-texto'
+import { geocodeDestination } from './weather.service'
 import { log } from '../logger'
 
 export type Transporte = 'aviao' | 'carro' | 'onibus' | 'local'
@@ -47,6 +48,13 @@ async function lugarDaPosicao(lat: number, lng: number): Promise<string | null> 
   } catch { return null }
 }
 
+function distanciaKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const R = 6371, rad = (x: number) => (x * Math.PI) / 180
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng)
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(h))
+}
+
 const mesmaCidade = (a: string | null | undefined, b: string) => {
   const n = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().split(/\s*[-,]\s*/)[0].trim()
   return !!a && n(a) === n(b)
@@ -56,7 +64,16 @@ export async function montarContexto(phone: string, destino: string, chegada: st
   const ctx: ContextoRoteiro = { partida: null, gostos: [], lugaresDesejados: [], jaFeitos: [], gostou: [], naoGostou: [], eventos: [] }
   const e = lerExtras(phone)
   const tarefas: Promise<unknown>[] = []
-  if (e?.partida) tarefas.push(lugarDaPosicao(e.partida.lat, e.partida.lng).then(l => { ctx.partida = l ? `perto de ${l} (posição do celular: ${e.partida!.lat.toFixed(4)}, ${e.partida!.lng.toFixed(4)})` : `posição do celular: ${e.partida!.lat.toFixed(4)}, ${e.partida!.lng.toFixed(4)}` }))
+  // A posição do celular só serve de ponto de partida se a pessoa já está no destino (até 80 km).
+  // Quem pede o roteiro de casa, antes de viajar, está a milhares de km: nesse caso é ignorada.
+  // (Em 14/11 um roteiro de Foz saiu com "3900 min de carro de onde você está", a partir de João Pessoa.)
+  let partidaVale = false
+  if (e?.partida) {
+    const centro = await geocodeDestination(destino).catch(() => null)
+    partidaVale = !!centro && distanciaKm({ lat: centro.lat, lng: centro.lon }, e.partida) <= 80
+    if (!partidaVale) guardarExtras(phone, { transporte: e.transporte })
+  }
+  if (e?.partida && partidaVale) tarefas.push(lugarDaPosicao(e.partida.lat, e.partida.lng).then(l => { ctx.partida = l ? `perto de ${l} (posição do celular: ${e.partida!.lat.toFixed(4)}, ${e.partida!.lng.toFixed(4)})` : `posição do celular: ${e.partida!.lat.toFixed(4)}, ${e.partida!.lng.toFixed(4)}` }))
   tarefas.push(lerCadastro(phone).then(c => { ctx.gostos = c.gostos ?? []; ctx.lugaresDesejados = c.lugaresDesejados ?? [] }).catch(() => { /* sem cadastro */ }))
   tarefas.push((async () => {
     const conv = await conversaPorTelefone(phone)

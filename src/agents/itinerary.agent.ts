@@ -111,8 +111,9 @@ export async function generateItineraryText(params: GenerateItineraryParams): Pr
     if (!departureTime || departureTime === 'não informado') return 'ÚLTIMO DIA: horário de volta não informado. Planeje o dia normalmente até o jantar e NÃO inclua traslado, aeroporto ou rodoviária.'
     const [h] = departureTime.split(':').map(Number)
     if (transportMode === 'aviao' || transportMode === 'onibus') {
-      // Avião: 5h de antecedência (2h no aeroporto + 3h para organizar e deslocar). Ônibus: 2h.
-      const bufferH = transportMode === 'aviao' ? 5 : 2
+      // Avião: 3h de antecedência (2h no aeroporto + 1h para pegar as malas e chegar lá). Ônibus: 2h.
+      // (Era 5h: com voo às 22h o roteiro acabava às 17h e a pessoa perdia a tarde.)
+      const bufferH = transportMode === 'aviao' ? 3 : 2
       const cutoffH = h - bufferH
       const transport = transportMode === 'aviao' ? 'voo' : 'ônibus'
       const destination = transportMode === 'aviao' ? 'aeroporto' : 'rodoviária'
@@ -184,7 +185,7 @@ ${originCity ? `- Cidade de origem: ${originCity}` : ''}
 - Ponto de partida de cada dia: ${hospedagem && hospedagem !== 'não informado' ? `hospedagem: ${hospedagem}` : contexto?.partida ? contexto.partida : 'NÃO INFORMADO (na primeira parada escreva "🚗 Ponto de partida do dia")'}${blocoPessoa}
 ${forceDays ? `- Dias de roteiro: ${forceDays}` : ''}
 ${hasMonday ? '⚠️ SEGUNDA-FEIRA no roteiro — use apenas locais que abrem na segunda.' : ''}
-${/turista de neg[oó]cios/i.test(touristProfile) ? '⚠️ PERFIL DE NEGÓCIOS: em cada dia cheio, pelo menos METADE das paradas diurnas são de negócios de verdade (coworking, hub de inovação, centro de convenções, entidade empresarial, café bom para trabalhar ou reunião, evento do setor). Passeio turístico só no fim da tarde ou à noite.' : ''}
+${/turista de neg[oó]cios/i.test(touristProfile) ? '⚠️ PERFIL DE NEGÓCIOS: nos DIAS ÚTEIS, pelo menos METADE das paradas diurnas são de negócios de verdade (coworking, hub de inovação, entidade empresarial com atendimento, café bom para trabalhar ou reunião, evento do setor confirmado). No sábado, domingo e feriado, só o que abre de verdade, e o resto do dia vai para os outros interesses do pedido.' : ''}
 ${lastDayInstruction}
 ${day1StartInstruction}
 
