@@ -1,11 +1,23 @@
 import axios from 'axios'
-import { createCanvas, loadImage, registerFont } from 'canvas'
+import fs from 'fs'
+import path from 'path'
+import { createCanvas, loadImage, type Image } from 'canvas'
 import { log } from '../logger'
 
 // Chave da Pexels só pelo .env (a antiga, escrita no código, vazou no repositório público: trocar)
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY || ''
 const SUPABASE_URL = process.env.SUPABASE_URL!
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!
+
+// A logo oficial (src/assets/sol-brand.png), lida uma vez só. Sem o arquivo, o rodapé sai só com o texto.
+let logoCarregada: Promise<Image | null> | null = null
+function logoDaSol(): Promise<Image | null> {
+  if (!logoCarregada) {
+    const arquivo = [path.join(__dirname, '../assets/sol-brand.png'), path.join(process.cwd(), 'src/assets/sol-brand.png')].find(f => fs.existsSync(f))
+    logoCarregada = arquivo ? loadImage(arquivo).catch(() => null) : Promise.resolve(null)
+  }
+  return logoCarregada
+}
 
 // Busca imagem de destino no Pexels (orientação portrait para stories)
 async function fetchPexelsImage(destination: string): Promise<Buffer | null> {
@@ -129,16 +141,37 @@ export async function generateStoryImage(
     ctx.font = 'bold 42px sans-serif'
     ctx.fillText('Quero o meu também →', W / 2, baseY + 410)
 
-    // Rodapé com branding "Feito pela Sol"
-    ctx.fillStyle = 'rgba(0,0,0,0.55)'
-    ctx.fillRect(0, H - 140, W, 140)
+    // Rodapé: a logo da Sol (a mesma da marca d'água das fotos) ao lado de "Feito pela Sol"
+    const faixa = 170
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'
+    ctx.fillRect(0, H - faixa, W, faixa)
+    const titulo = 'Feito pela Sol'
+    const sub = 'Seu guia de viagem no WhatsApp'
+    ctx.font = 'bold 52px sans-serif'
+    const larguraTitulo = ctx.measureText(titulo).width
+    ctx.font = '30px sans-serif'
+    const larguraTexto = Math.max(larguraTitulo, ctx.measureText(sub).width)
+    const marca = await logoDaSol()
+    const lado = marca ? 116 : 0
+    const vao = marca ? 26 : 0
+    const x0 = (W - (lado + vao + larguraTexto)) / 2
+    if (marca) {
+      // Miolo branco, como a logo aparece no app (o arquivo tem o centro transparente)
+      const alt = lado * (marca.height / marca.width)
+      const topo = H - faixa + (faixa - alt) / 2
+      ctx.fillStyle = '#ffffff'
+      ctx.beginPath()
+      ctx.arc(x0 + lado / 2, topo + alt / 2, Math.min(lado, alt) / 2 - 3, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.drawImage(marca, x0, topo, lado, alt)
+    }
+    ctx.textAlign = 'left'
     ctx.fillStyle = 'rgba(255,215,60,0.97)'
     ctx.font = 'bold 52px sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillText('☀️ Feito pela Sol', W / 2, H - 68)
-    ctx.fillStyle = 'rgba(255,255,255,0.45)'
-    ctx.font = '32px sans-serif'
-    ctx.fillText('Seu guia de viagem no WhatsApp', W / 2, H - 22)
+    ctx.fillText(titulo, x0 + lado + vao, H - faixa + 82)
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'
+    ctx.font = '30px sans-serif'
+    ctx.fillText(sub, x0 + lado + vao, H - faixa + 128)
 
     return canvas.toBuffer('image/jpeg', { quality: 0.92 })
   } catch (err) {

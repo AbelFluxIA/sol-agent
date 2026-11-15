@@ -39,6 +39,7 @@ import { geocodeDestination } from '../services/weather.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
 import { generateStoryImage, uploadStoryImage } from '../services/story.service'
+import { criarLinkDaViagem } from '../services/viagem-link.service'
 import { checkAndDeductCredit } from '../services/credits.service'
 import { logApiUsage } from '../services/usage.service'
 import { getWeatherAndMarine } from '../services/weather.service'
@@ -52,7 +53,7 @@ import {
   buildGeneratingMessage,
   buildItinerarySentMessage,
   buildFreeItineraryMessage,
-  buildReferralMessage,
+  buildTripShareMessage,
   buildGuiaOfferMessage,
   buildGuiaButtonsText,
   buildGuiaActivatedMessage,
@@ -509,16 +510,17 @@ export async function receberFoto(
       const legenda = `Roteiro para ${destination}, ${name} ✈️`
       await saveMessage(phone, 'assistant', `${legenda}\n${storyUrl}`)
       if (channel === 'whatsapp') await sendImage(phone, storyUrl, legenda)
-      const referralCode = conv.referralCode || ''
-      if (referralCode && config.whatsappNumber) {
-        const { bodyText, ctaUrl } = buildReferralMessage(name, referralCode, config.whatsappNumber)
-        await saveMessage(phone, 'assistant', `${bodyText}\n\n${ctaUrl}`)
+      // Compartilhar é da viagem (link só dela, 7 dias), não da Sol nem do mural inteiro
+      const link = await criarLinkDaViagem(phone, { itineraryId: latest.id }).catch(() => null)
+      if (link) {
+        const texto = buildTripShareMessage(name, destination)
+        await saveMessage(phone, 'assistant', `${texto}\n\n${link.url}`)
         if (channel === 'whatsapp') {
-          await sendHuman(phone, bodyText)
+          await sendHuman(phone, texto)
           try {
-            await sendCtaButton(phone, 'Compartilhe com amigos:', 'Indicar agora', ctaUrl)
+            await sendCtaButton(phone, 'Página da sua viagem:', 'Abrir e compartilhar', link.url)
           } catch {
-            await sendWithTyping(phone, `🔗 ${ctaUrl}`, 400)
+            await sendWithTyping(phone, `🔗 ${link.url}`, 400)
           }
         }
       }

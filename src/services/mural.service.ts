@@ -87,7 +87,7 @@ export async function addPhotoToMuralWithNarration(
 
     if (!name || !destination) return null
 
-    const { id: muralId, shareCode } = await getOrCreateMural(phone, name, destination)
+    const { id: muralId } = await getOrCreateMural(phone, name, destination)
 
     // Busca fotos atuais para calcular order_index
     const photos = await supabaseGet('mural_photos', `mural_id=eq.${muralId}`)
@@ -158,10 +158,10 @@ Escreva um comentário curto (2-3 linhas) sobre esta foto como se você fosse a 
       await supabasePatch('photo_murals', `id=eq.${muralId}`, { cover_photo_url: photoUrl })
     }
 
-    const muralUrl = `${config.appPublicUrl}/mural/${shareCode}`
-    log.info('foto adicionada ao mural', { phone, step: 'add-photo-mural', data: { orderIndex, muralUrl } })
+    // O álbum fica no app (todas as viagens, só para a pessoa); compartilhar é por viagem
+    log.info('foto adicionada ao mural', { phone, step: 'add-photo-mural', data: { orderIndex } })
 
-    return `📸 *Mural atualizado!* Abre aqui:\n${muralUrl}`
+    return `📸 *Foto no álbum da viagem!* Veja aqui:\n${config.appPublicUrl}/app/mural`
   } catch (err) {
     log.error('erro ao narrar foto do mural', err, { phone, step: 'add-photo-mural' })
     return null

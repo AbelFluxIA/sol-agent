@@ -52,7 +52,7 @@ export async function excluirConta(phone: string): Promise<ResumoExclusao> {
   const fotosMural: { photo_url: string }[] = []
   for (const m of murais) fotosMural.push(...await ler<{ photo_url: string }>('mural_photos', `mural_id=eq.${m.id}&select=photo_url`))
   const pdfs = await ler<{ pdf_url: string | null }>('generated_itineraries', `${f}&select=pdf_url`)
-  const roteirosPrisma = await prisma.itinerary.findMany({ where: { conversation: { phone } }, select: { pdfUrl: true } })
+  const roteirosPrisma = await prisma.itinerary.findMany({ where: { conversation: { phone } }, select: { pdfUrl: true, storyPhotoUrl: true } })
   const fotoPerfil = await prisma.$queryRaw<{ foto_url: string | null }[]>`select foto_url from public.sol_cadastro where phone = ${phone}`
   resumo.arquivos = await apagarArquivos([
     fotoPerfil[0]?.foto_url,
@@ -60,6 +60,7 @@ export async function excluirConta(phone: string): Promise<ResumoExclusao> {
     ...fotosMural.map(x => x.photo_url),
     ...pdfs.map(x => x.pdf_url),
     ...roteirosPrisma.map(x => x.pdfUrl),
+    ...roteirosPrisma.map(x => x.storyPhotoUrl), // imagem personalizada (tem a foto e o nome da pessoa)
   ])
   resumo.fotos = fotos.length + fotosMural.length
 
@@ -81,6 +82,7 @@ export async function excluirConta(phone: string): Promise<ResumoExclusao> {
   await prisma.$executeRaw`delete from public.sol_avaliacoes where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_avisos where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_push where phone = ${phone}`
+  await prisma.$executeRaw`delete from public.sol_viagens_link where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_indicacoes where convidado_phone = ${phone} or indicador_phone = ${phone}`
 
   // 4. Conversa (leva junto mensagens e roteiros) e custos sem o telefone

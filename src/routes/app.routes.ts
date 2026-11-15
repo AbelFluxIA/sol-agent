@@ -9,7 +9,8 @@ import { config } from '../config'
 import { transcribeAudio } from '../services/media.service'
 import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
-import { getAlbum, estadoDoAlbum, apagarFotoDoAlbum, MENSAGEM_BLOQUEIO } from '../services/album.service'
+import { estadoDoAlbum, apagarFotoDoAlbum, MENSAGEM_BLOQUEIO } from '../services/album.service'
+import { albumComLinks, criarLinkDaViagem, desativarLinkDaViagem, viagemPublica } from '../services/viagem-link.service'
 import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigoDetalhado, telefoneDoPedido, pedidoExiste } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
 import { fotoDoLocal, fotosLigadas } from '../services/fotos-lugar.service'
@@ -181,21 +182,13 @@ router.post('/api/app/erro-cliente', limitar('erro-cliente', 20, 3600_000), (req
 router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
   try {
-    // Tudo ao mesmo tempo (o mural ia depois, em fila: uma viagem a mais até o banco)
-    const supabaseUrl = process.env.SUPABASE_URL!
-    const serviceKey = process.env.SUPABASE_SERVICE_KEY!
-    const [conv, stats, itinerary, cota, cadastro, aceites, murals] = await Promise.all([
+    const [conv, stats, itinerary, cota, cadastro, aceites] = await Promise.all([
       getOrCreateConversation(phone),
       getAccountStats(phone),
       getLatestItinerary(phone),
       roteirosDaSemana(phone),
       lerCadastro(phone),
       consentimentos(phone),
-      // Mural via Supabase REST; se falhar, o perfil sai sem o mural (como antes)
-      fetch(
-        `${supabaseUrl}/rest/v1/photo_murals?phone=eq.${encodeURIComponent(phone)}&order=created_at.desc&limit=1`,
-        { headers: { Authorization: `Bearer ${serviceKey}`, apikey: serviceKey }, signal: AbortSignal.timeout(8000) }
-      ).then(async (r): Promise<any[]> => { const j = r.ok ? await r.json() : []; return Array.isArray(j) ? j : [] }).catch((): any[] => []),
     ])
 
     res.json({
@@ -226,7 +219,7 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
       freeCredits: conv.freeCredits,
       referralCode: conv.referralCode,
       referralStats: stats,
-      mural: murals[0] ?? null,
+      mural: null, // o link do mural inteiro deixou de existir (RA-FOT-05); o álbum traz o link de cada viagem
       itinerary: itinerary
         ? { id: itinerary.id, days: itinerary.days, status: itinerary.status, pdfUrl: itinerary.pdfUrl }
         : null,
@@ -939,10 +932,57 @@ router.post('/api/app/presenca', clientAuthMiddleware, async (req: Request, res:
 router.get('/api/app/album', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
   try {
-    const [album, envio] = await Promise.all([getAlbum(phone), estadoDoAlbum(phone)])
+    const [album, envio] = await Promise.all([albumComLinks(phone), estadoDoAlbum(phone)])
     res.json({ ...album, envio })
   } catch (err) {
     log.error('erro ao montar o álbum do app', err, { phone, step: 'app-album' })
+    res.status(500).json({ error: 'Erro interno' })
+  }
+})
+
+// ─── Link por viagem (RA-FOT-05) ─────────────────────────────────────────────
+// Cada link abre as fotos de UMA viagem, vale 7 dias e o dono pode desligar.
+router.post('/api/app/viagem/link', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const { inicio, itineraryId } = req.body ?? {}
+  try {
+    const link = await criarLinkDaViagem(phone, {
+      inicio: typeof inicio === 'string' && inicio.length <= 40 ? inicio : undefined,
+      itineraryId: typeof itineraryId === 'string' && itineraryId.length <= 40 ? itineraryId : undefined,
+    })
+    if (!link) { res.status(404).json({ error: 'Viagem não encontrada' }); return }
+    log.info('link de viagem criado', { phone, step: 'viagem-link' })
+    res.json(link)
+  } catch (err) {
+    log.error('erro ao criar link da viagem', err, { phone, step: 'viagem-link' })
+    res.status(500).json({ error: 'Não consegui criar o link agora' })
+  }
+})
+
+router.post('/api/app/viagem/link/desativar', clientAuthMiddleware, async (req: Request, res: Response) => {
+  const phone = (req as any).clientPhone as string
+  const { codigo } = req.body ?? {}
+  if (typeof codigo !== 'string' || codigo.length > 40) { res.status(400).json({ error: 'Link inválido' }); return }
+  try {
+    const ok = await desativarLinkDaViagem(phone, codigo)
+    if (!ok) { res.status(404).json({ error: 'Link não encontrado' }); return }
+    log.info('link de viagem desligado', { phone, step: 'viagem-link' })
+    res.json({ ok: true })
+  } catch (err) {
+    log.error('erro ao desligar link da viagem', err, { phone, step: 'viagem-link' })
+    res.status(500).json({ error: 'Não consegui desligar agora' })
+  }
+})
+
+// Página pública da viagem (sem login): só quem tem o link secreto
+router.get('/api/publico/viagem/:codigo', async (req: Request, res: Response) => {
+  try {
+    const v = await viagemPublica(String(req.params.codigo))
+    if (!v) { res.status(404).json({ error: 'Link não encontrado' }); return }
+    if (v === 'encerrado') { res.status(410).json({ error: 'Este link não está mais ativo' }); return }
+    res.set('Cache-Control', 'no-store').json(v)
+  } catch (err) {
+    log.error('erro ao abrir viagem pública', err, { step: 'viagem-link' })
     res.status(500).json({ error: 'Erro interno' })
   }
 })

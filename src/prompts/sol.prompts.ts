@@ -486,11 +486,13 @@ export function buildFreeItineraryMessage(name: string): string {
   return `${quem} um roteiro gratuito disponível! Já estou preparando tudo pra você ✨`
 }
 
-export function buildReferralMessage(name: string, referralCode: string, whatsappNumber: string): { bodyText: string; ctaUrl: string } {
-  const text = encodeURIComponent(`Oi Sol! Vim pelo link de ${name} (ref:${referralCode})`)
-  const ctaUrl = `https://wa.me/${whatsappNumber}?text=${text}`
-  const bodyText = `*${name}*, gostou do roteiro? Compartilha com quem vai viajar em breve! 🎁
+// Depois da imagem personalizada: a pessoa compartilha A VIAGEM (link só dela, RA-FOT-05),
+// não a Sol nem o mural inteiro. Quem entrar pela página da viagem conta como convite.
+export function buildTripShareMessage(name: string, destination: string): string {
+  const quem = name && name !== 'Viajante' ? `*${name}*, quer` : 'Quer'
+  return `${quem} mostrar essa viagem para alguém? 🎁
 
-Cada amigo que contratar pelo seu link, você ganha *1 roteiro grátis*, válido pra qualquer destino.`
-  return { bodyText, ctaUrl }
+Este link abre só a viagem${destination ? ` para ${destination}` : ''}: a imagem e as fotos que você mandar durante ela. Ele vale 7 dias e você pode desligar quando quiser, no Álbum.
+
+Quem entrar na Sol por ele conta como convite seu.`
 }

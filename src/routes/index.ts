@@ -11,7 +11,8 @@ import { markAsRead, downloadMedia, sendWithTyping, sendHuman, sendCtaButton, se
 import { watermarkVideo } from '../services/watermark.service'
 import { transcribeAudio } from '../services/media.service'
 import { generateStoryImage, uploadStoryImage } from '../services/story.service'
-import { buildGuiaActivatedMessage, buildReferralMessage } from '../prompts/sol.prompts'
+import { buildGuiaActivatedMessage, buildTripShareMessage } from '../prompts/sol.prompts'
+import { criarLinkDaViagem } from '../services/viagem-link.service'
 import { log } from '../logger'
 import { marcarWebhookWhatsapp } from '../services/logs.service'
 import { config } from '../config'
@@ -46,14 +47,13 @@ async function runAutoStory(phone: string): Promise<void> {
     await updateItinerary(latestIt.id, { storyPhotoUrl: storyUrl })
     await sendImage(phone, storyUrl, `Roteiro para ${destination}, ${name} ✈️`)
 
-    const referralCode = conv.referralCode || ''
-    if (referralCode && config.whatsappNumber) {
-      const { bodyText, ctaUrl } = buildReferralMessage(name, referralCode, config.whatsappNumber)
-      await sendHuman(phone, bodyText)
+    const link = await criarLinkDaViagem(phone, { itineraryId: latestIt.id }).catch(() => null)
+    if (link) {
+      await sendHuman(phone, buildTripShareMessage(name, destination))
       try {
-        await sendCtaButton(phone, 'Compartilhe com amigos:', 'Indicar agora', ctaUrl)
+        await sendCtaButton(phone, 'Página da sua viagem:', 'Abrir e compartilhar', link.url)
       } catch {
-        await sendWithTyping(phone, `🔗 ${ctaUrl}`, 400)
+        await sendWithTyping(phone, `🔗 ${link.url}`, 400)
       }
     }
   } catch (err) {
