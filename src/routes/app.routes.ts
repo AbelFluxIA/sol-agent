@@ -974,8 +974,9 @@ router.post('/api/app/viagem/link/desativar', clientAuthMiddleware, async (req: 
   }
 })
 
-// Página pública da viagem (sem login): só quem tem o link secreto
-router.get('/api/publico/viagem/:codigo', async (req: Request, res: Response) => {
+// Página pública da viagem (sem login): só quem tem o link secreto. Fica em /api/app porque
+// é o único caminho que o site (Vercel) e o proxy repassam para o bot.
+router.get('/api/app/publico/viagem/:codigo', async (req: Request, res: Response) => {
   try {
     const v = await viagemPublica(String(req.params.codigo))
     if (!v) { res.status(404).json({ error: 'Link não encontrado' }); return }
