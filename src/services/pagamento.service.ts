@@ -188,7 +188,7 @@ export async function liberarGuia(phone: string, dias: number): Promise<string> 
   const ate = somarDias(inicio, dias - 1)
   await prisma.$executeRaw`
     insert into public.sol_cadastro (phone, guia_ate, atualizado_em) values (${phone}, ${ate}::date, now())
-    on conflict (phone) do update set guia_ate = ${ate}::date, atualizado_em = now()`
+    on conflict (phone) do update set guia_ate = ${ate}::date, guia_terminou_em = null, atualizado_em = now()`
   await updateConversation(phone, { hasCompanion: true })
   return ate
 }

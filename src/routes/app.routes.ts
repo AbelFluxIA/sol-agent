@@ -10,6 +10,7 @@ import { transcribeAudio } from '../services/media.service'
 import { trackOperation } from '../shutdown'
 import { cancelGuiaReminder } from '../services/guia-reminder.service'
 import { estadoDoAlbum, apagarFotoDoAlbum, MENSAGEM_BLOQUEIO } from '../services/album.service'
+import { estadoDaGuia } from '../services/guia-prazo.service'
 import { albumComLinks, criarLinkDaViagem, desativarLinkDaViagem, viagemPublica } from '../services/viagem-link.service'
 import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigoDetalhado, telefoneDoPedido, pedidoExiste } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
@@ -219,6 +220,8 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
       freeCredits: conv.freeCredits,
       referralCode: conv.referralCode,
       referralStats: stats,
+      // Prazo da Guia: ativa até quando, dias que faltam e, se acabou, quando (o app avisa e oferece renovar)
+      guia: await estadoDaGuia(phone, conv.hasCompanion),
       mural: null, // o link do mural inteiro deixou de existir (RA-FOT-05); o álbum traz o link de cada viagem
       itinerary: itinerary
         ? { id: itinerary.id, days: itinerary.days, status: itinerary.status, pdfUrl: itinerary.pdfUrl }

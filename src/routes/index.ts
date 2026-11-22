@@ -390,7 +390,7 @@ router.post('/webhook/payment-guia', async (req: Request, res: Response) => {
     log.info('guia payment confirmado', { phone })
 
     await updateConversation(phone, { hasCompanion: true })
-    await limparPrazoGuia(phone) // Guia paga: sem prazo de crédito
+    await limparPrazoGuia(phone, true) // Guia paga pelo link antigo: sem prazo, mas sem apagar prazo comprado que ainda vale
 
     const conv = await getOrCreateConversation(phone)
     const name = conv.name || 'você'

@@ -9,7 +9,7 @@ import routes from './routes'
 import appRoutes from './routes/app.routes'
 import prisma from './services/database.service'
 import { startDailyJobs, startAvisosDaGuia } from './jobs/daily'
-import { expirarGuiasDeCredito } from './services/indicacao.service'
+import { manterGuiasNoPrazo } from './services/guia-prazo.service'
 import { waitForActiveOperations, operacoesAtivas } from './shutdown'
 import adminRoutes from './routes/admin.routes'
 import { definirDestinoDosLogs } from './logger'
@@ -124,9 +124,11 @@ async function bootstrap() {
     else startDailyJobs()
     startAvisosDaGuia()
 
-    // Guia ganha por indicação tem prazo: confere de hora em hora (não envia mensagens)
-    setInterval(() => { expirarGuiasDeCredito().catch(err => log.error('erro ao encerrar guias de crédito', err, { step: 'indicacao' })) }, 3600_000).unref()
-    expirarGuiasDeCredito().catch(() => { /* tenta na próxima hora */ })
+    // Prazo da Guia (comprada ou por crédito): de 10 em 10 minutos mantém ligada quem está no prazo,
+    // avisa quando está perto do fim e encerra as vencidas (só cria avisos; não envia mensagem sozinha)
+    const prazoDaGuia = () => manterGuiasNoPrazo().catch(err => log.error('erro ao conferir o prazo das guias', err, { step: 'guia-prazo' }))
+    setInterval(prazoDaGuia, 600_000).unref()
+    void prazoDaGuia()
 
     if (!config.meta.appSecret) log.warn('META_APP_SECRET não definido: a assinatura do webhook do WhatsApp não é conferida', { step: 'bootstrap' })
     if (!config.abacatePay.webhookSecret) log.warn('ABACATEPAY_WEBHOOK_SECRET vazio: webhooks de pagamento recusados', { step: 'bootstrap' })

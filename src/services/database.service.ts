@@ -363,32 +363,26 @@ export async function addFreeCredit(phone: string): Promise<void> {
   log.info('crédito grátis adicionado', { phone, step: 'add-free-credit' })
 }
 
-// Desativa companions 1 dia após a data de partida
-export async function deactivateExpiredCompanions(): Promise<number> {
+// Desativa a Guia 1 dia depois do fim da viagem (RA-GUI-04), MENOS de quem tem prazo comprado
+// ainda valendo (sol_cadastro.guia_ate): Guia de 30 dias vale os 30 dias, com ou sem viagem.
+// (Em 16/11/2026 esta rotina desligou uma Guia de 30 dias paga dois dias antes.)
+// Só consulta (não muda nada): quem a rotina desligaria agora
+export async function guiasParaDesligarPorFimDeViagem(): Promise<string[]> {
   // Só desativa se departureDate < ontem (1 dia de buffer)
   const yesterday = new Date()
   yesterday.setDate(yesterday.getDate() - 1)
   const cutoff = yesterday.toISOString().split('T')[0]
+  const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  const comPrazo = (await prisma.$queryRaw<{ phone: string }[]>`select phone from public.sol_cadastro where guia_ate >= ${hoje}::date`).map(r => r.phone)
+  const lista = await prisma.conversation.findMany({ where: { hasCompanion: true, departureDate: { lt: cutoff }, phone: { notIn: comPrazo } }, select: { phone: true } })
+  return lista.map(c => c.phone)
+}
 
-  const expired = await prisma.conversation.findMany({
-    where: {
-      hasCompanion: true,
-      departureDate: { lt: cutoff },
-    },
-    select: { phone: true, name: true },
-  })
-
-  if (expired.length === 0) return 0
-
-  await prisma.conversation.updateMany({
-    where: {
-      hasCompanion: true,
-      departureDate: { lt: cutoff },
-    },
-    data: { hasCompanion: false },
-  })
-
-  return expired.length
+export async function deactivateExpiredCompanions(): Promise<number> {
+  const phones = await guiasParaDesligarPorFimDeViagem()
+  if (phones.length === 0) return 0
+  await prisma.conversation.updateMany({ where: { phone: { in: phones }, hasCompanion: true }, data: { hasCompanion: false } })
+  return phones.length
 }
 
 // Retorna usuários cuja viagem encerrou ontem (para survey pós-viagem)

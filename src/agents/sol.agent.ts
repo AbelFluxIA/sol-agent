@@ -146,7 +146,7 @@ export async function responderOfertaGuia(
   }
   if (config.demoFreeMode) {
     await updateConversation(phone, { hasCompanion: true })
-    await limparPrazoGuia(phone)
+    await limparPrazoGuia(phone, true) // quem já tem prazo comprado não perde os dias
     const activationMsg = buildGuiaActivatedMessage(name)
     await saveMessage(phone, 'assistant', activationMsg)
     if (channel === 'whatsapp') await sendHuman(phone, activationMsg)

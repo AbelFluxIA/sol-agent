@@ -46,12 +46,14 @@ async function comunicadosAtivos(cidades: string[]): Promise<Comunicado[]> {
 }
 
 // ─── Avisos automáticos (Guia Sol, durante a viagem) ─────────────────────────
-async function criar(phone: string, a: { tipo: string; nivel: Nivel; titulo: string; texto: string; link?: string | null; chave: string; validoAte?: Date }): Promise<void> {
+export async function criarAviso(phone: string, a: { tipo: string; nivel: Nivel; titulo: string; texto: string; link?: string | null; chave: string; validoAte?: Date }): Promise<void> {
   await prisma.$executeRaw`
     insert into public.sol_avisos (phone, tipo, nivel, titulo, texto, link, chave, valido_ate)
     values (${phone}, ${a.tipo}, ${a.nivel}, ${a.titulo.slice(0, 120)}, ${a.texto.slice(0, 500)}, ${a.link ?? null}, ${a.chave.slice(0, 200)}, ${a.validoAte ?? fimDoDia()})
     on conflict (phone, chave) do nothing`
 }
+const criar = criarAviso
+
 
 const avaliadoEm = new Map<string, number>()
 // Avalia as regras para uma pessoa em viagem com a Guia. No máximo 1 vez por hora.
@@ -250,6 +252,13 @@ export async function enviarAvisosDe(phone: string, porPush: boolean, mandar: (a
   return enviados
 }
 
+// Quem tem aviso da Guia (fim de prazo próximo ou Guia encerrada) ainda não enviado ao celular
+async function telefonesComAvisoDeGuia(): Promise<string[]> {
+  return (await prisma.$queryRaw<{ phone: string }[]>`
+    select distinct phone from public.sol_avisos where tipo = 'guia' and enviado_whatsapp_em is null and enviado_push_em is null
+      and lido_em is null and visto_app_em is null and (valido_ate is null or valido_ate > now())`).map(r => r.phone)
+}
+
 // ─── Envio ao celular (a cada 30 min) ────────────────────────────────────────
 // Para cada pessoa em viagem com a Guia: avalia as regras e manda o que ainda não foi.
 // Quem ligou as notificações do app recebe por lá (sem custo e sem a janela de 24 h);
@@ -258,7 +267,9 @@ export async function enviarAvisosDe(phone: string, porPush: boolean, mandar: (a
 export async function enviarAvisosPendentes(): Promise<void> {
   const hora = Math.floor(horaBR() / 60)
   if (hora < 8 || hora >= 21) return // horário de silêncio
-  const ativos = await getActiveCompanions()
+  const emViagem = await getActiveCompanions()
+  // Aviso de fim de prazo ou de Guia encerrada vale também para quem não está em viagem ou já ficou sem a Guia
+  const ativos = [...new Set([...emViagem.map(a => a.phone), ...await telefonesComAvisoDeGuia().catch((): string[] => [])])].map(phone => ({ phone }))
   for (const { phone } of ativos) {
     try {
       await avaliarAvisos(phone)

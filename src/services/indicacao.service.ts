@@ -160,18 +160,10 @@ export async function resgatarDiasGuia(phone: string, dias: number): Promise<{ o
   }
 }
 
-// Guia paga ou ligada pela administração não tem prazo de crédito: limpa o guia_ate
-export async function limparPrazoGuia(phone: string): Promise<void> {
-  await prisma.$executeRaw`update public.sol_cadastro set guia_ate = null where phone = ${phone}`
+// Guia ligada sem prazo (pela administração, ou grátis no período de teste): limpa o guia_ate.
+// `manterPrazoValendo`: quem tem prazo comprado ainda valendo não perde os dias que pagou.
+export async function limparPrazoGuia(phone: string, manterPrazoValendo = false): Promise<void> {
+  if (manterPrazoValendo) await prisma.$executeRaw`update public.sol_cadastro set guia_ate = null where phone = ${phone} and guia_ate < ${hojeBrasil()}::date`
+  else await prisma.$executeRaw`update public.sol_cadastro set guia_ate = null where phone = ${phone}`
 }
-
-// Desliga a Guia de quem estava só com dias de crédito e o prazo acabou. Roda de hora em hora
-// (não manda mensagem, então não depende de DISABLE_DAILY_JOBS).
-export async function expirarGuiasDeCredito(): Promise<number> {
-  const vencidos = await prisma.$queryRaw<{ phone: string }[]>`
-    update public.sol_cadastro set guia_ate = null where guia_ate < ${hojeBrasil()}::date returning phone`
-  if (!vencidos.length) return 0
-  await prisma.conversation.updateMany({ where: { phone: { in: vencidos.map(v => v.phone) } }, data: { hasCompanion: false } })
-  log.info('guias de crédito encerradas', { step: 'indicacao', data: { quantos: vencidos.length } })
-  return vencidos.length
-}
+// O fim do prazo (desligar, avisar e perguntar da renovação) fica em guia-prazo.service.ts
