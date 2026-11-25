@@ -10,6 +10,7 @@ import appRoutes from './routes/app.routes'
 import prisma from './services/database.service'
 import { startDailyJobs, startAvisosDaGuia } from './jobs/daily'
 import { manterGuiasNoPrazo } from './services/guia-prazo.service'
+import { carregarExclusoesPendentes, executarExclusoesVencidas } from './services/exclusao.service'
 import { waitForActiveOperations, operacoesAtivas } from './shutdown'
 import adminRoutes from './routes/admin.routes'
 import { definirDestinoDosLogs } from './logger'
@@ -21,6 +22,9 @@ const app = express()
 app.use(cors({
   origin: [
     'https://painel.tripsol.com.br',
+    // Site principal: as páginas públicas /sol/... (a de exclusão de conta chama a API)
+    'https://tripsol.com.br',
+    'https://www.tripsol.com.br',
     'https://iaturismo.vercel.app',
     'https://iaturismo-two.vercel.app',
     // App nativo (Capacitor): origem do WebView no Android e no iPhone
@@ -129,6 +133,12 @@ async function bootstrap() {
     const prazoDaGuia = () => manterGuiasNoPrazo().catch(err => log.error('erro ao conferir o prazo das guias', err, { step: 'guia-prazo' }))
     setInterval(prazoDaGuia, 600_000).unref()
     void prazoDaGuia()
+
+    // Pedidos de exclusão de conta: carrega os que estão em espera e, de hora em hora, apaga os que venceram os 7 dias
+    await carregarExclusoesPendentes().catch(err => log.error('erro ao carregar pedidos de exclusão', err, { step: 'excluir-conta' }))
+    const exclusoes = () => executarExclusoesVencidas().catch(err => log.error('erro na rotina de exclusão de contas', err, { step: 'excluir-conta' }))
+    setInterval(exclusoes, 3600_000).unref()
+    if (process.env.MODO_CARGA !== '1') setTimeout(exclusoes, 60_000).unref()
 
     if (!config.meta.appSecret) log.warn('META_APP_SECRET não definido: a assinatura do webhook do WhatsApp não é conferida', { step: 'bootstrap' })
     if (!config.abacatePay.webhookSecret) log.warn('ABACATEPAY_WEBHOOK_SECRET vazio: webhooks de pagamento recusados', { step: 'bootstrap' })

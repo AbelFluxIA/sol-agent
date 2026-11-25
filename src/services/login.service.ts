@@ -15,29 +15,41 @@ const VALIDADE_PEDIDO_MS = 15 * 60 * 1000
 const VALIDADE_CODIGO_MS = 10 * 60 * 1000
 const LETRAS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
-interface Pedido { criadoEm: number; phone?: string }
+export type Finalidade = 'entrar' | 'excluir'
+interface Pedido { criadoEm: number; phone?: string; finalidade: Finalidade }
 interface Codigo { code: string; expiraEm: number; tentativas: number }
 
 const pedidos = new Map<string, Pedido>()
 const codigos = new Map<string, Codigo>() // phone → código
+// RA-CAD-03: 5 códigos errados bloqueiam o número por 5 horas (phone → até quando)
+const BLOQUEIO_MS = 5 * 60 * 60 * 1000
+const bloqueios = new Map<string, number>()
+export function bloqueadoAte(phone: string): number | null {
+  const ate = bloqueios.get(phone)
+  if (!ate) return null
+  if (ate <= Date.now()) { bloqueios.delete(phone); return null }
+  return ate
+}
 
 setInterval(() => {
   const agora = Date.now()
   for (const [k, p] of pedidos) if (agora - p.criadoEm > VALIDADE_PEDIDO_MS) pedidos.delete(k)
   for (const [k, c] of codigos) if (c.expiraEm < agora) codigos.delete(k)
+  for (const [k, ate] of bloqueios) if (ate < agora) bloqueios.delete(k)
 }, 5 * 60 * 1000).unref()
 
 // No máximo 50 mil pedidos em aberto (cada um vale 15 min): uma inundação de pedidos
 // de login não consegue encher a memória. Devolve '' quando o teto é atingido.
-export function criarPedido(): string {
+export function criarPedido(finalidade: Finalidade = 'entrar'): string {
   if (pedidos.size >= 50_000) return ''
   let id = ''
   do { id = Array.from({ length: 6 }, () => LETRAS[Math.floor(Math.random() * LETRAS.length)]).join('') } while (pedidos.has(id))
-  pedidos.set(id, { criadoEm: Date.now() })
+  pedidos.set(id, { criadoEm: Date.now(), finalidade })
   return id
 }
 
-export const textoDoPedido = (pedido: string) => `Código para entrar no app Sol (pedido ${pedido})`
+export const textoDoPedido = (pedido: string, finalidade: Finalidade = 'entrar') =>
+  finalidade === 'excluir' ? `Código para excluir minha conta no app Sol (pedido ${pedido})` : `Código para entrar no app Sol (pedido ${pedido})`
 
 // Gera (ou troca) o código de 6 dígitos de um número. Nunca dois ao mesmo tempo.
 export function gerarCodigo(phone: string): string {
@@ -46,16 +58,17 @@ export function gerarCodigo(phone: string): string {
   return code
 }
 
-// Confere o código de um número; 5 tentativas erradas invalidam o código.
+// Confere o código de um número; 5 tentativas erradas cancelam o código e bloqueiam o número por 5 horas (RA-CAD-03).
 // Devolve o motivo, para o painel de administração explicar por que alguém não entrou.
 export type ResultadoCodigo = 'ok' | 'sem-codigo' | 'vencido' | 'errado' | 'bloqueado'
 export function conferirCodigoDetalhado(phone: string, code: string): ResultadoCodigo {
+  if (bloqueadoAte(phone)) return 'bloqueado'
   const c = codigos.get(phone)
   if (!c) return 'sem-codigo'
   if (c.expiraEm < Date.now()) { codigos.delete(phone); return 'vencido' }
   if (c.code !== code.trim()) {
     c.tentativas++
-    if (c.tentativas >= 5) { codigos.delete(phone); return 'bloqueado' }
+    if (c.tentativas >= 5) { codigos.delete(phone); bloqueios.set(phone, Date.now() + BLOQUEIO_MS); return 'bloqueado' }
     return 'errado'
   }
   codigos.delete(phone)
@@ -68,6 +81,11 @@ export function telefoneDoPedido(pedido: string): string | null {
   const p = pedidos.get(pedido.toUpperCase())
   if (!p || Date.now() - p.criadoEm > VALIDADE_PEDIDO_MS) return null
   return p.phone ?? null
+}
+
+// Para que o pedido foi criado (entrar no app ou excluir a conta): um não serve para o outro
+export function finalidadeDoPedido(pedido: string): Finalidade | null {
+  return pedidos.get(pedido.toUpperCase())?.finalidade ?? null
 }
 
 export function pedidoExiste(pedido: string): boolean {
@@ -84,21 +102,32 @@ export async function tratarMensagemDeLogin(waId: string, texto: string): Promis
   if (!comPedido && !soCodigo) return false
 
   const phone = await resolvePhone(waId)
+  let finalidade: Finalidade = 'entrar'
   if (comPedido) {
     const pedido = pedidos.get(comPedido[1].toUpperCase())
-    if (pedido && Date.now() - pedido.criadoEm <= VALIDADE_PEDIDO_MS) pedido.phone = phone
+    if (pedido && Date.now() - pedido.criadoEm <= VALIDADE_PEDIDO_MS) { pedido.phone = phone; finalidade = pedido.finalidade }
     else log.warn('login: mensagem chegou com pedido vencido ou desconhecido', { phone, step: 'app-auth', data: { pedido: comPedido[1].toUpperCase() } })
+  }
+  const bloqueio = bloqueadoAte(phone)
+  if (bloqueio) {
+    const hora = new Date(bloqueio).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
+    try { await sendMessage(waId, `Por segurança, este número está bloqueado para receber códigos até as ${hora} (horário de Brasília), porque o código foi digitado errado 5 vezes. Depois desse horário é só pedir de novo.`) } catch { /* sem envio: a tela do app também avisa */ }
+    log.warn('login: código pedido com o número bloqueado', { phone, step: 'app-auth' })
+    return true
   }
   const code = gerarCodigo(phone)
   // Duas mensagens: a explicação e, sozinho, o código (fica fácil de copiar)
-  const msg =
-    '🔐 Seu código para entrar no app Sol está na próxima mensagem.\n\n' +
-    'Copie o número, volte para o app e cole no campo do código. Vale por 10 minutos.\n\n' +
-    'Não compartilhe com ninguém. Se não foi você que pediu, é só ignorar.'
+  const msg = finalidade === 'excluir'
+    ? '🔐 Seu código para confirmar o pedido de EXCLUSÃO da sua conta na Sol está na próxima mensagem.\n\n' +
+      'Copie o número, volte para a página e cole no campo do código. Vale por 10 minutos.\n\n' +
+      'Se não foi você que pediu, é só ignorar: nada é apagado sem o código.'
+    : '🔐 Seu código para entrar no app Sol está na próxima mensagem.\n\n' +
+      'Copie o número, volte para o app e cole no campo do código. Vale por 10 minutos.\n\n' +
+      'Não compartilhe com ninguém. Se não foi você que pediu, é só ignorar.'
   try {
     await sendMessage(waId, msg)
     await sendMessage(waId, code)
-    log.info('código de login enviado', { phone, step: 'app-auth', data: { comPedido: !!comPedido, pedido: comPedido ? comPedido[1].toUpperCase() : undefined } })
+    log.info('código de login enviado', { phone, step: 'app-auth', data: { comPedido: !!comPedido, finalidade, pedido: comPedido ? comPedido[1].toUpperCase() : undefined } })
   } catch (err) {
     log.error('erro ao enviar código de login', err, { phone, step: 'app-auth' })
   }

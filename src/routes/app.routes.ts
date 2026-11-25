@@ -12,7 +12,7 @@ import { cancelGuiaReminder } from '../services/guia-reminder.service'
 import { estadoDoAlbum, apagarFotoDoAlbum, MENSAGEM_BLOQUEIO } from '../services/album.service'
 import { estadoDaGuia } from '../services/guia-prazo.service'
 import { albumComLinks, criarLinkDaViagem, desativarLinkDaViagem, viagemPublica } from '../services/viagem-link.service'
-import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigoDetalhado, telefoneDoPedido, pedidoExiste } from '../services/login.service'
+import { criarPedido, textoDoPedido, gerarCodigo, conferirCodigoDetalhado, telefoneDoPedido, pedidoExiste, finalidadeDoPedido, bloqueadoAte } from '../services/login.service'
 import { recomendarDestinos, cidadeDaPosicao } from '../services/sugestoes.service'
 import { fotoDoLocal, fotosLigadas } from '../services/fotos-lugar.service'
 import { trocarAtividade, avaliarAtividade, avaliacoesDoRoteiro, MOTIVOS_DE_TROCA } from '../services/troca.service'
@@ -27,7 +27,7 @@ import {
 } from '../services/presenca.service'
 import { log } from '../logger'
 import { excedeu, limitar, limiteGeral, limiteDeArquivos, podeHoje, segredoConfere } from '../middleware/limites'
-import { excluirConta } from '../services/conta.service'
+import { pedirExclusao, cancelarExclusao, exclusaoPedidaEm, ESPERA_DIAS, PRAZO_DIAS } from '../services/exclusao.service'
 import { criarCompra, gerarPix, gerarCheckout, lerPagamento, conferirNaAbacate, precoDoRoteiro, precoUnitario, diasDaViagem, type TipoCompra } from '../services/pagamento.service'
 import { confirmarPagamento } from '../services/pagamento-entrega.service'
 import { vincularConvite, resumoIndicacao, resgatarDiasGuia, limparPrazoGuia } from '../services/indicacao.service'
@@ -67,15 +67,20 @@ export function clientAuthMiddleware(req: Request, res: Response, next: NextFunc
     res.status(401).json({ error: 'Não autenticado' })
     return
   }
-  let payload: { phone: string; name: string }
+  let payload: { phone: string; name: string; iat?: number; uso?: string }
   try {
-    payload = jwt.verify(auth.slice(7), JWT_SECRET) as { phone: string; name: string }
+    payload = jwt.verify(auth.slice(7), JWT_SECRET) as typeof payload
   } catch {
     res.status(401).json({ error: 'Token inválido ou expirado' })
     return
   }
+  // O token da página de exclusão serve só para confirmar o pedido, nunca como sessão do app
+  if (payload.uso) { res.status(401).json({ error: 'Token inválido ou expirado' }); return }
   phoneDaConversa(payload.phone)
     .then(phone => {
+      // Exclusão pedida depois desta sessão: ela deixa de valer. Entrar de novo cancela o pedido (RA-EXC-04).
+      const pedida = exclusaoPedidaEm(phone)
+      if (pedida && (payload.iat ?? 0) * 1000 < pedida) { res.status(401).json({ error: 'Há um pedido de exclusão desta conta. Entre de novo para cancelar o pedido.', exclusaoPedida: true }); return }
       ;(req as any).clientPhone = phone
       ;(req as any).clientName = payload.name
       next()
@@ -84,6 +89,13 @@ export function clientAuthMiddleware(req: Request, res: Response, next: NextFunc
       log.error('erro ao conferir número da sessão', err, { step: 'app-auth' })
       res.status(503).json({ error: 'Tente de novo em instantes' })
     })
+}
+
+// RA-CAD-03: 5 códigos errados bloqueiam o número por 5 horas
+const MENSAGEM_BLOQUEIO_CODIGO = (phone: string) => {
+  const ate = bloqueadoAte(phone)
+  const hora = ate ? new Date(ate).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }) : null
+  return `O código foi digitado errado 5 vezes. Por segurança, este número fica bloqueado por 5 horas${hora ? ` (até as ${hora}, horário de Brasília)` : ''}.`
 }
 
 // ─── POST /api/app/auth/pedido ──────────────────────────────────────────────
@@ -137,6 +149,7 @@ router.post('/api/app/auth/verificar-otp', limitar('otp-verificar', 30, 600_000)
 
   let phone: string | null = null
   if (typeof pedido === 'string' && pedido) {
+    if (finalidadeDoPedido(pedido) === 'excluir') { res.status(401).json({ error: 'Este código é da página de exclusão de conta. Toque em "Receber código no WhatsApp" para entrar.' }); return }
     if (!pedidoExiste(pedido)) { log.warn('login: tentou entrar com pedido vencido', { step: 'app-auth', data: { pedido: String(pedido).slice(0, 8) } }); res.status(401).json({ error: 'O pedido expirou. Toque em "Receber código no WhatsApp" de novo.' }); return }
     phone = telefoneDoPedido(pedido)
     if (!phone) { log.warn('login: digitou código, mas a mensagem do WhatsApp ainda não chegou', { step: 'app-auth', data: { pedido: String(pedido).slice(0, 8) } }); res.status(401).json({ error: 'A Sol ainda não recebeu sua mensagem no WhatsApp. Envie a mensagem e espere o código.' }); return }
@@ -149,15 +162,17 @@ router.post('/api/app/auth/verificar-otp', limitar('otp-verificar', 30, 600_000)
   if (resultado !== 'ok') {
     const MOTIVOS: Record<string, string> = { 'sem-codigo': 'não havia código ativo para o número', vencido: 'código vencido (10 min)', errado: 'código errado', bloqueado: 'código errado 5 vezes: código cancelado' }
     log.warn(`login: não entrou (${MOTIVOS[resultado] ?? resultado})`, { phone, step: 'app-auth', data: { motivo: resultado, porPedido: !!pedido } })
-    res.status(401).json({ error: 'Código incorreto ou vencido. Confira o código que a Sol mandou.' })
+    res.status(401).json({ error: resultado === 'bloqueado' ? MENSAGEM_BLOQUEIO_CODIGO(phone) : 'Código incorreto ou vencido. Confira o código que a Sol mandou.' })
     return
   }
 
   const conv = await getOrCreateConversation(phone)
+  // Entrar na conta durante os 7 dias de espera cancela o pedido de exclusão (RA-EXC-04)
+  const exclusaoCancelada = await cancelarExclusao(phone).catch(() => false)
   const token = jwt.sign({ phone, name: conv.name || '' }, JWT_SECRET, { expiresIn: '30d' })
 
-  log.info('login app realizado', { phone, step: 'app-auth', data: { porPedido: !!pedido } })
-  res.json({ token, name: conv.name || '', phone })
+  log.info('login app realizado', { phone, step: 'app-auth', data: { porPedido: !!pedido, exclusaoCancelada } })
+  res.json({ token, name: conv.name || '', phone, exclusaoCancelada })
 })
 
 // ─── POST /api/app/erro-cliente ──────────────────────────────────────────────
@@ -767,19 +782,80 @@ router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res:
   }
 })
 
-// ─── POST /api/app/conta/excluir ─────────────────────────────────────────────
-// Exclusão da conta pela própria pessoa (LGPD; exigência da App Store e do Play).
-// Apaga conversa, roteiros, fotos, PDFs, cadastro, consentimentos e presença.
+// ─── Exclusão de conta (RA-EXC-01 a 12) ───────────────────────────────────────
+// O pedido vem do app (logado) ou da página pública /sol/excluir-conta (com o código do WhatsApp).
+// Fica 7 dias em espera; entrar na conta cancela; a conta é apagada em até 15 dias desde o pedido.
 // (POST, e não DELETE: a reescrita da Vercel e o Traefik tratam POST sem surpresas.)
+const resumoDaExclusao = async (phone: string) => {
+  const conv = await prisma.conversation.findUnique({ where: { phone }, select: { hasCompanion: true } })
+  const guia = conv ? await estadoDaGuia(phone, conv.hasCompanion) : null
+  return { temConta: !!conv, acessoPago: !!guia?.ativa, acessoPagoAte: guia?.ate ?? null, esperaDias: ESPERA_DIAS, prazoDias: PRAZO_DIAS }
+}
+
+router.get('/api/app/conta/exclusao', clientAuthMiddleware, async (req: Request, res: Response) => {
+  try { res.json(await resumoDaExclusao((req as any).clientPhone as string)) }
+  catch (err) { log.error('erro no resumo da exclusão', err, { step: 'excluir-conta' }); res.status(500).json({ error: 'Erro interno' }) }
+})
+
 router.post('/api/app/conta/excluir', clientAuthMiddleware, async (req: Request, res: Response) => {
   const phone = (req as any).clientPhone as string
   if (req.body?.confirmo !== true) { res.status(400).json({ error: 'Confirmação obrigatória' }); return }
-  if (excedeu('excluir-conta', phone, 2, 3600_000)) { res.status(429).json({ error: 'Espere um pouco e tente de novo.' }); return }
+  if (excedeu('excluir-conta', phone, 5, 3600_000)) { res.status(429).json({ error: 'Espere um pouco e tente de novo.' }); return }
   try {
-    res.json({ ok: true, resumo: await excluirConta(phone) })
+    res.json({ ok: true, pedido: await pedirExclusao(phone, 'app') })
   } catch (err) {
-    log.error('erro ao excluir conta', err, { phone, step: 'excluir-conta' })
-    res.status(500).json({ error: 'Não consegui excluir agora. Tente de novo em instantes.' })
+    log.error('erro ao registrar o pedido de exclusão', err, { phone, step: 'excluir-conta' })
+    res.status(500).json({ error: 'O pedido NÃO foi registrado. Tente de novo em instantes.' })
+  }
+})
+
+// Página pública: 1) cria o pedido e devolve a mensagem pronta para a pessoa mandar à Sol no WhatsApp
+// (é ela que começa a conversa, então o código sempre chega e o número fica provado);
+router.post('/api/app/publico/exclusao/pedido', limitar('exclusao-pedido-ip', 20, 3600_000), (_req: Request, res: Response) => {
+  if (!config.whatsappNumber) { res.status(503).json({ error: 'Número da Sol não configurado' }); return }
+  const pedido = criarPedido('excluir')
+  if (!pedido) { res.status(503).json({ error: 'Muitos pedidos agora. Tente de novo em um minuto.' }); return }
+  res.json({ pedido, whatsapp: config.whatsappNumber, texto: textoDoPedido(pedido, 'excluir') })
+})
+
+// 2) confere o código que a Sol respondeu e mostra o resumo (o que tem de acesso pago);
+router.post('/api/app/publico/exclusao/validar', limitar('exclusao-validar-ip', 30, 600_000), async (req: Request, res: Response) => {
+  const { pedido, codigo } = req.body ?? {}
+  if (typeof pedido !== 'string' || typeof codigo !== 'string' || pedido.length > 12 || codigo.length > 12) { res.status(400).json({ error: 'Informe o código de 6 dígitos.' }); return }
+  try {
+    if (!pedidoExiste(pedido) || finalidadeDoPedido(pedido) !== 'excluir') { res.status(401).json({ error: 'Este pedido expirou. Comece de novo.', motivo: 'expirou' }); return }
+    const phone = telefoneDoPedido(pedido)
+    if (!phone) { res.status(409).json({ error: 'A Sol ainda não recebeu a sua mensagem no WhatsApp. Envie a mensagem e espere o código chegar.', motivo: 'aguardando' }); return }
+    const resultado = conferirCodigoDetalhado(phone, codigo)
+    if (resultado !== 'ok') {
+      log.warn(`exclusão pela página: código não conferiu (${resultado})`, { phone, step: 'excluir-conta' })
+      res.status(401).json({ error: resultado === 'bloqueado' ? MENSAGEM_BLOQUEIO_CODIGO(phone) : 'Código incorreto ou vencido. Confira o código que a Sol mandou.', motivo: resultado })
+      return
+    }
+    const token = jwt.sign({ phone, uso: 'exclusao' }, JWT_SECRET, { expiresIn: '20m' })
+    res.json({ token, ...(await resumoDaExclusao(phone)) })
+  } catch (err) {
+    log.error('erro ao validar o código da exclusão', err, { step: 'excluir-conta' })
+    res.status(500).json({ error: 'Não consegui conferir agora. Tente de novo.' })
+  }
+})
+
+// 3) registra o pedido.
+router.post('/api/app/publico/exclusao/confirmar', limitar('exclusao-confirmar-ip', 20, 3600_000), async (req: Request, res: Response) => {
+  let phone: string
+  try {
+    const p = jwt.verify(String(req.body?.token ?? ''), JWT_SECRET) as { phone: string; uso?: string }
+    if (p.uso !== 'exclusao') throw new Error('uso')
+    phone = p.phone
+  } catch { res.status(401).json({ error: 'A confirmação expirou. Comece de novo.' }); return }
+  try {
+    const conv = await prisma.conversation.findUnique({ where: { phone }, select: { id: true } })
+    // Sem conta: nada a apagar. Quem recebe esta resposta provou que é dono do número.
+    if (!conv) { res.json({ ok: true, temConta: false }); return }
+    res.json({ ok: true, temConta: true, pedido: await pedirExclusao(phone, 'site') })
+  } catch (err) {
+    log.error('erro ao registrar o pedido de exclusão (página)', err, { phone, step: 'excluir-conta' })
+    res.status(500).json({ error: 'O pedido NÃO foi registrado. Tente de novo em instantes.' })
   }
 })
 
