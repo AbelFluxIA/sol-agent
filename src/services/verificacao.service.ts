@@ -16,7 +16,7 @@ import { perguntarAoGemini } from './gemini'
 import { lerParadas, ehLogistica, ehGenerico, minutos, duracaoMin, trajetoMin, ajustarHorarios, acertarCabecalho, type Parada } from './roteiro-texto'
 
 const API = 'https://places.googleapis.com/v1'
-type Estado = 'ok' | 'nao-encontrado' | 'fechado' | 'fechado-no-horario' | 'mal-avaliado' | 'sem-dados' | 'generico' | 'repetido' | 'caro' | 'imperdivel'
+type Estado = 'ok' | 'nao-encontrado' | 'fechado' | 'fechado-no-horario' | 'mal-avaliado' | 'sem-dados' | 'generico' | 'repetido' | 'caro' | 'imperdivel' | 'longe' | 'interesse'
 interface Ponto { lat: number; lng: number }
 export interface Conferencia { parada: Parada; estado: Estado; ponto: Ponto | null; motivo?: string }
 
@@ -178,6 +178,17 @@ async function conferir(texto: string, destino: string, datas: string[], centro:
     const chave = chaveDoLugar(c.parada.nome)
     if (c.estado === 'ok' && chave.length >= 5 && paradas.some(x => x.inicio < c.parada.inicio && !ehLogistica(x.nome) && chaveDoLugar(x.nome) === chave)) c.estado = 'repetido'
   }
+  // Zigue-zague: restaurante longe (mais de 6 km) da parada anterior E da próxima, que ficam mais perto uma da
+  // outra do que dele. Restaurante se troca por outro perto sem perda; atração longe pode ser de propósito.
+  for (let i = 1; i < saida.length - 1; i++) {
+    const a = saida[i - 1], b = saida[i], c = saida[i + 1]
+    if (b.estado !== 'ok' || !EH_COMIDA.test(b.parada.nome) || a.parada.dia !== b.parada.dia || c.parada.dia !== b.parada.dia || !a.ponto || !b.ponto || !c.ponto) continue
+    const ab = distanciaKm(a.ponto, b.ponto), bc = distanciaKm(b.ponto, c.ponto), ac = distanciaKm(a.ponto, c.ponto)
+    if (ab > 6 && bc > 6 && ac < Math.min(ab, bc)) {
+      b.estado = 'longe'
+      b.motivo = `este restaurante obriga a um vai e volta: fica a ${ab.toFixed(0)} km da parada anterior ("${a.parada.nome.replace(/\*/g, '')}") e a ${bc.toFixed(0)} km da próxima ("${c.parada.nome.replace(/\*/g, '')}"), que estão a ${ac.toFixed(0)} km uma da outra. Escolha um restaurante bom a até 2 km da parada anterior, ou no caminho entre as duas`
+    }
+  }
   return saida
 }
 
@@ -209,6 +220,7 @@ const MOTIVO: Record<string, string> = {
   'mal-avaliado': 'o lugar é mal avaliado pelos visitantes',
   generico: 'a parada não diz QUAL lugar é (nome genérico): escolha um lugar real, com nome, na mesma região em que a pessoa está nesse momento do dia (veja a parada anterior)',
   repetido: 'este lugar JÁ APARECE antes no roteiro: escolha outro lugar, diferente de todos os que já estão nele',
+  longe: 'fica longe das paradas vizinhas: escolha um lugar do mesmo tipo a até 2 km da parada anterior',
   caro: 'é CARO para o orçamento ECONÔMICO da pessoa: escolha um lugar simples e barato de verdade para comer (prato feito, self-service por quilo, lanchonete, mercado municipal, pastelaria, comida de rua), com refeição de até R$ 45 por pessoa, e escreva na linha 💰 o preço real. Nada de rodízio, steakhouse, bistrô ou restaurante de hotel',
 }
 
@@ -257,6 +269,59 @@ Sem comentários antes ou depois.`
   }
   log.info('paradas reprovadas trocadas', { phone, step: 'verificacao', data: { reprovadas: ruins.length, trocadas } })
   return novo.join('\n')
+}
+
+// ─── Interesses do pedido ────────────────────────────────────────────────────
+// Os dois primeiros interesses que a pessoa escolheu precisam aparecer no roteiro. Reconhecimento por palavras
+// do nome e do comentário de cada parada. Se um deles ficou sem NENHUMA parada (Recife com "Natureza" e nenhuma
+// praia), uma parada de passeio do interesse que mais aparece dá lugar a uma dele, antes da conferência.
+const PALAVRAS_DO_INTERESSE: [RegExp, RegExp, string][] = [
+  [/natureza|praia/i, /praia|parque|trilha|cachoeira|jardim bot|mirante|lagoa|\brio\b|ilha|mata|reserva|piscinas? naturais?|dunas|mangue|bosque|orla|ba[ií]a|falésia|gruta|serra|morro|p[oô]r do sol|ecol[oó]gic|natural/i, 'praia, parque, trilha, mirante, orla ou outro lugar ao ar livre na natureza'],
+  [/cultura/i, /museu|igreja|catedral|bas[ií]lica|centro hist[oó]rico|teatro|memorial|galeria|centro cultural|casa de cultura|convento|forte|fortaleza|pal[aá]cio|patrim[oô]nio|mosteiro|biblioteca|artesanato|capela|santu[aá]rio|s[ií]tio hist|pelourinho|instituto|funda[cç][aã]o/i, 'museu, centro histórico, igreja histórica, centro cultural ou outro lugar de história e arte'],
+  [/aventura/i, /trilha|rapel|tirolesa|mergulho|flutua[cç][aã]o|buggy|rafting|canoagem|caiaque|stand up|escalada|bike|bicicleta|quadriciclo|kitesurf|surf|parapente|arvorismo|voo|off-?road|snorkel|boia-?cross|cachoeira|passeio de (barco|lancha|jangada|catamar)/i, 'trilha, mergulho, passeio de barco, tirolesa, buggy ou outra atividade de aventura de verdade'],
+  [/bares|pubs|vida noturna/i, /\bbar\b|\bpub\b|boteco|cervejaria|choperia|balada|m[uú]sica ao vivo|samba|forr[oó]|rooftop|drinks|happy hour/i, 'bar, pub, cervejaria ou casa com música ao vivo, à noite'],
+  [/gastronomia/i, /mercado|feira|degusta[cç][aã]o|cervejaria|vin[ií]cola|caf[eé]|doceria|sorveteria|confeitaria|restaurante|t[ií]pic|gastron|culin[aá]ri/i, 'mercado, feira gastronômica, degustação ou restaurante típico marcante'],
+]
+export function interessesSemParada(texto: string, interesses: string[]): { interesse: string; exemplo: string }[] {
+  const { linhas, paradas } = lerParadas(texto)
+  const blocos = paradas.filter(p => !ehLogistica(p.nome)).map(p => `${p.nome} ${linhas.slice(p.inicio, p.fim).filter(l => l.includes('💬')).join(' ')}`)
+  const faltam: { interesse: string; exemplo: string }[] = []
+  for (const pedido of interesses.slice(0, 2)) {
+    const regra = PALAVRAS_DO_INTERESSE.find(([re]) => re.test(pedido))
+    if (!regra) continue
+    if (!blocos.some(b => regra[1].test(b))) faltam.push({ interesse: pedido, exemplo: regra[2] })
+  }
+  return faltam
+}
+
+export async function garantirInteresses(texto: string, o: { destino: string; datas: string[]; perfil: string; interesses: string[]; phone?: string; itineraryId?: string }): Promise<{ texto: string; incluidos: string[] }> {
+  const faltam = interessesSemParada(texto, o.interesses)
+  if (!faltam.length) return { texto, incluidos: [] }
+  const { paradas } = lerParadas(texto)
+  const passeios = paradas.filter(p => !ehLogistica(p.nome) && !EH_COMIDA.test(p.nome))
+  if (passeios.length < 3) return { texto, incluidos: [] }
+  // Sai uma parada de passeio diurna (9h às 16h) por interesse que faltou, de dias diferentes quando der
+  const ruins: Conferencia[] = []
+  const usados = new Set<number>()
+  for (const f of faltam) {
+    const noturno = /bares|pubs|vida noturna/i.test(f.interesse)
+    const candidatas = passeios.filter(p => { const m = minutos(p.hora); return m !== null && !ruins.some(r => r.parada.inicio === p.inicio) && (noturno ? m >= 17 * 60 : m >= 9 * 60 && m <= 16 * 60) })
+    const alvo = [...candidatas].reverse().find(p => !usados.has(p.dia)) ?? candidatas[candidatas.length - 1]
+    if (!alvo) continue
+    usados.add(alvo.dia)
+    ruins.push({ parada: alvo, estado: 'interesse', ponto: null, motivo: `esta parada dá lugar a uma de "${f.interesse}", que é um dos interesses principais da pessoa e ficou sem NENHUMA parada no roteiro. Escolha ${f.exemplo}, real, bem avaliado, em ${o.destino} ou bem perto, aberto nesse dia e horário (aqui NÃO precisa manter o tipo da parada original)` })
+  }
+  if (!ruins.length) return { texto, incluidos: [] }
+  try {
+    const novo = await reparar(texto, ruins.sort((a, b) => a.parada.inicio - b.parada.inicio), o.destino, o.perfil, o.datas, o.phone, o.itineraryId)
+    const ainda = interessesSemParada(novo, o.interesses).map(f => f.interesse)
+    const incluidos = faltam.map(f => f.interesse).filter(i => !ainda.includes(i))
+    log.info('interesse do pedido sem parada: roteiro ajustado', { phone: o.phone, step: 'verificacao', data: { faltavam: faltam.map(f => f.interesse), incluidos, noLugarDe: ruins.map(r => r.parada.nome.replace(/\*/g, '')) } })
+    return incluidos.length ? { texto: novo, incluidos } : { texto, incluidos: [] }
+  } catch (err) {
+    log.warn('ajuste dos interesses falhou', { phone: o.phone, step: 'verificacao', data: { error: (err as Error).message } })
+    return { texto, incluidos: [] }
+  }
 }
 
 // ─── Cartões-postais do destino ──────────────────────────────────────────────

@@ -93,6 +93,23 @@ NUNCA escreva apenas "viajante econômico" sem especificar o tipo de experiênci
   {
     type: 'function',
     function: {
+      name: 'trocar_parada',
+      description:
+        'Troca UMA parada do roteiro do cliente por outra opção (só com a Guia Sol ativa). Use quando ele pedir para trocar ou substituir uma parada, por exemplo "troca o museu de amanhã por praia" ou "não quero mais o restaurante X". Se não der para saber QUAL parada, pergunte antes de chamar. Não serve para tirar uma parada sem repor nem para mudar horários.',
+      parameters: {
+        type: 'object',
+        properties: {
+          parada: { type: 'string', description: 'Nome da parada a trocar, como aparece no roteiro do cliente' },
+          dia: { type: 'integer', description: 'Número do dia no roteiro (1, 2, 3...), se der para saber pela conversa (hoje, amanhã)' },
+          pedido: { type: 'string', description: 'O que o cliente quer no lugar, com as palavras dele (ex.: "praia", "algo coberto", "um lugar mais barato"). Deixe vazio se ele não disse.' },
+        },
+        required: ['parada'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'ativar_guia',
       description:
         'Envia o link para ativar a Sol Guia. Use quando o cliente pedir para ativar, quiser o acompanhamento em tempo real, perguntar sobre a Sol Guia ou quiser saber como ativar.',

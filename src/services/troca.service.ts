@@ -3,7 +3,7 @@
 // pela mesma conferência do Google Maps. Também guarda "gostei / não gostei".
 import prisma, { getItineraryForPhone, updateItinerary, getOrCreateConversation } from './database.service'
 import { perguntarAoGemini } from './gemini'
-import { lerParadas } from './roteiro-texto'
+import { lerParadas, acertarReferenciasDeTrajeto } from './roteiro-texto'
 import { conferirRoteiro } from './verificacao.service'
 import { geocodeDestination } from './weather.service'
 import { generatePdf } from './pdf.service'
@@ -26,7 +26,15 @@ const datasEntre = (chegada: string, saida: string) => {
   return d
 }
 
-export async function trocarAtividade(phone: string, itineraryId: string, dia: number, indice: number, nomeEsperado: string, motivo: string): Promise<{ texto: string; nova: string } | { erro: string; status: number }> {
+// Distância escrita na linha 🚗 de um bloco ("(11,1 km)" ou "(350 m)"), em km
+const kmDaLinha = (bloco: string[]): number | null => {
+  const l = bloco.find(x => x.trim().startsWith('🚗')) ?? ''
+  const km = l.match(/\((\d+(?:[.,]\d+)?)\s*km\)/), m = l.match(/\((\d+)\s*m\)/)
+  return km ? Number(km[1].replace(',', '.')) : m ? Number(m[1]) / 1000 : null
+}
+
+// `pedido`: o que a pessoa quer no lugar, com as palavras dela (troca pedida na conversa com a Guia)
+export async function trocarAtividade(phone: string, itineraryId: string, dia: number, indice: number, nomeEsperado: string, motivo: string, pedido?: string): Promise<{ texto: string; nova: string } | { erro: string; status: number }> {
   const it = await getItineraryForPhone(phone, itineraryId)
   if (!it?.rawItinerary) return { erro: 'Roteiro não encontrado', status: 404 }
   const { linhas, paradas } = lerParadas(it.rawItinerary)
@@ -51,7 +59,7 @@ Perfil da pessoa: ${it.touristProfile || conv.touristProfile || 'turista geral'}
 Parada a trocar (${diaSemana}${data ? `, ${data}` : ''}, ${alvo.periodo} ${alvo.hora}):
 ${bloco}
 
-Motivo da troca: ${MOTIVOS[motivo] ?? MOTIVOS.outro}.
+Motivo da troca: ${MOTIVOS[motivo] ?? MOTIVOS.outro}.${pedido ? `\nO que a pessoa PEDIU no lugar: "${pedido.replace(/["\n]/g, ' ').slice(0, 200)}". Atenda o pedido com um lugar real desse tipo; se ela pediu outro tipo de programa, a nova parada NÃO precisa ser do mesmo tipo da original.` : ''}
 ${anterior ? `Parada anterior do dia: ${anterior.nome.replace(/\*/g, '')} (${anterior.hora}).` : 'É a primeira parada do dia.'}
 ${proxima ? `Próxima parada do dia: ${proxima.nome.replace(/\*/g, '')} (${proxima.hora}).` : 'É a última parada do dia.'}
 Lugares que JÁ ESTÃO no roteiro (não repita): ${jaNoRoteiro}
@@ -65,22 +73,39 @@ Regras:
 
 Responda SOMENTE com o bloco novo, sem comentários.`
 
-  let novoBloco: string[] = []
-  for (let tentativa = 1; tentativa <= 2 && !novoBloco.length; tentativa++) {
-    const resposta = await perguntarAoGemini(prompt, { callType: 'troca_atividade', phone, itineraryId, maxTokens: 1500, temperatura: 0.7, timeoutMs: 60_000 })
-    const candidato = resposta.replace(/^```[a-z]*\n?|```$/gm, '').trim().split('\n').filter(l => !/^###/.test(l))
-    const lidas = lerParadas(`DIA 1\n${candidato.join('\n')}`).paradas
-    if (lidas.length === 1 && limpar(lidas[0].nome) !== limpar(alvo.nome)) novoBloco = candidato
-  }
-  if (!novoBloco.length) return { erro: 'Não consegui achar outra opção agora. Tente de novo em instantes.', status: 502 }
-
-  const novas = [...linhas]
-  novas.splice(alvo.inicio, alvo.fim - alvo.inicio, ...novoBloco)
-  let texto = novas.join('\n')
-  // Confere as paradas desse dia (a nova e os deslocamentos para as vizinhas)
+  // Até 2 opções: se a primeira ficar bem mais longe das paradas vizinhas do que a original (a troca criava
+  // vai e volta: uma parada a 200 m virou uma a 10 km), pede outra mais perto e fica com a melhor das duas.
   const centro = destino ? await geocodeDestination(destino).then(c => ({ lat: c.lat, lng: c.lon })).catch(() => null) : null
-  const conf = await conferirRoteiro(texto, { destino, datas, centro, perfil: `${it.touristProfile || ''}, ${it.groupType || ''}`, phone, itineraryId, soDia: dia, hospedagem: (it.touristProfile || conv.touristProfile || '').match(/\|\s*hospedagem:\s*(.+)$/)?.[1]?.trim() ?? null })
-  texto = conf.texto
+  const kmAntes = (kmDaLinha(linhas.slice(alvo.inicio, alvo.fim)) ?? 0) + (proxima ? kmDaLinha(linhas.slice(proxima.inicio, proxima.fim)) ?? 0 : 0)
+  const tentar = async (extra: string): Promise<{ texto: string; km: number } | null> => {
+    let novoBloco: string[] = []
+    for (let tentativa = 1; tentativa <= 2 && !novoBloco.length; tentativa++) {
+      const resposta = await perguntarAoGemini(prompt + extra, { callType: 'troca_atividade', phone, itineraryId, maxTokens: 1500, temperatura: 0.7, timeoutMs: 60_000 })
+      const candidato = resposta.replace(/^```[a-z]*\n?|```$/gm, '').trim().split('\n').filter(l => !/^###/.test(l))
+      // Símbolo no começo do nome ("*☔ Piscinas Naturais*") não faz parte do nome do lugar
+      if (candidato[0]) candidato[0] = candidato[0].replace(/(\):\*\s*\*?)\s*(?:[\u2600-\u27BF\u{1F300}-\u{1FAFF}]\uFE0F?\s*)+/u, '$1')
+      const lidas = lerParadas(`DIA 1\n${candidato.join('\n')}`).paradas
+      if (lidas.length === 1 && limpar(lidas[0].nome) !== limpar(alvo.nome)) novoBloco = candidato
+    }
+    if (!novoBloco.length) return null
+    const novas = [...linhas]
+    novas.splice(alvo.inicio, alvo.fim - alvo.inicio, ...novoBloco)
+    // Confere as paradas desse dia (a nova e os deslocamentos para as vizinhas)
+    const conf = await conferirRoteiro(novas.join('\n'), { destino, datas, centro, perfil: `${it.touristProfile || ''}, ${it.groupType || ''}`, phone, itineraryId, soDia: dia, hospedagem: (it.touristProfile || conv.touristProfile || '').match(/\|\s*hospedagem:\s*(.+)$/)?.[1]?.trim() })
+    const lido = lerParadas(conf.texto)
+    const doDiaNovo = lido.paradas.filter(p => p.dia === dia)
+    const nova = doDiaNovo[alvo.indice], depois = doDiaNovo[alvo.indice + 1]
+    const km = (nova ? kmDaLinha(lido.linhas.slice(nova.inicio, nova.fim)) ?? 0 : 0) + (depois ? kmDaLinha(lido.linhas.slice(depois.inicio, depois.fim)) ?? 0 : 0)
+    return { texto: conf.texto, km }
+  }
+  let melhor = await tentar('')
+  if (!melhor) return { erro: 'Não consegui achar outra opção agora. Tente de novo em instantes.', status: 502 }
+  if (motivo !== 'longe' && melhor.km > Math.max(6, kmAntes * 2 + 3)) {
+    const nomeLonge = lerParadas(melhor.texto).paradas.filter(p => p.dia === dia)[alvo.indice]?.nome.replace(/\*/g, '') ?? ''
+    const outra = await tentar(`\n\nATENÇÃO: a opção "${nomeLonge}" NÃO serve, ficou longe demais (${melhor.km.toFixed(0)} km de deslocamento somando a ida e a saída). Escolha OUTRO lugar, a no máximo 3 km ${anterior ? `de "${anterior.nome.replace(/\*/g, '')}"` : proxima ? `de "${proxima.nome.replace(/\*/g, '')}"` : 'do centro'}.`).catch(() => null)
+    if (outra && outra.km < melhor.km) melhor = outra
+  }
+  let texto = acertarReferenciasDeTrajeto(melhor.texto).texto
 
   await updateItinerary(itineraryId, { rawItinerary: texto })
   // Cópia usada pelo link público do roteiro (/r/código)

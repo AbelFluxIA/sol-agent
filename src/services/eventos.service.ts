@@ -55,8 +55,27 @@ async function enderecoPublico(url: string): Promise<boolean> {
   } catch { return false }
 }
 
-export async function fonteConfere(e: { titulo: string; fonte: string }, cidade: string): Promise<boolean> {
+// A página da fonte cita a data do evento? Aceita "05/12", "5/12", "5 de dezembro", "05 dez", "2026-12-05".
+// (Rodada de 25/11: um festival de setembro apareceu num roteiro de dezembro; o nome batia, a data não.)
+const MESES_EVENTO = ['janeiro', 'fevereiro', 'marco', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro']
+export function paginaCitaAData(html: string, data: string): boolean {
+  const m = data.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return true
+  const [, ano, mm, dd] = m
+  const d = String(Number(dd)), mes = MESES_EVENTO[Number(mm) - 1]
+  const formas = [
+    `${ano}-${mm}-${dd}`, `${dd}/${mm}`, `${d}/${mm}`, `${dd}/${Number(mm)}`, `${d}/${Number(mm)}`, `${dd}.${mm}`, `${dd}-${mm}-${ano}`,
+    `${d} de ${mes}`, `${dd} de ${mes}`, `${d} ${mes.slice(0, 3)}`, `${dd} ${mes.slice(0, 3)}`, `${d}º de ${mes}`,
+  ]
+  // "dia 5" sozinho não vale; evento de vários dias: basta o mês e o ano na página junto de "a 5"/"até 5" é raro, então fica nas formas acima
+  return formas.some(f => html.includes(f))
+}
+// Endereço com cara de inventado: código só com o mesmo dígito ou em sequência ("...__2222222", "/1234567")
+const CODIGO_FALSO = /(?:^|[^0-9])(\d)\1{5,}(?:[^0-9]|$)|(?:^|[^0-9])(?:1234567|0123456|9876543)\d*(?:[^0-9]|$)/
+
+export async function fonteConfere(e: { titulo: string; fonte: string; data?: string }, cidade: string): Promise<boolean> {
   try {
+    if (CODIGO_FALSO.test(new URL(e.fonte).pathname)) return false
     let url = e.fonte
     let r: any = null
     // Segue os redirecionamentos à mão, conferindo cada endereço
@@ -81,6 +100,8 @@ export async function fonteConfere(e: { titulo: string; fonte: string }, cidade:
     // A página precisa citar o evento: pelo menos 2 palavras próprias do título (ou todas, se forem menos)
     const daCidade = new Set(semAcento(cidade).split(/[^a-z0-9]+/))
     const palavras = [...new Set(semAcento(e.titulo).split(/[^a-z0-9]+/).filter(p => p.length >= 5 && !PALAVRAS_COMUNS.has(p) && !daCidade.has(p)))]
+    // E a data: sem ela, a página pode ser de outra edição do evento
+    if (e.data && !paginaCitaAData(html, e.data)) return false
     if (!palavras.length) return true
     return palavras.filter(p => html.includes(p)).length >= Math.min(2, palavras.length)
   } catch { return false }

@@ -29,14 +29,15 @@ import {
   shareCodeDoRoteiro,
 } from '../services/database.service'
 import prisma from '../services/database.service'
+import { trocarAtividade } from '../services/troca.service'
 import { estadoDaGuia } from '../services/guia-prazo.service'
 import { cidadeDaPosicao } from '../services/sugestoes.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { guardarExtras, lerExtras, montarContexto, type Transporte } from '../services/roteiro-contexto.service'
-import { conferirRoteiro, reforcarNegocios, cabeNoHorarioEscrito, garantirImperdiveis } from '../services/verificacao.service'
+import { conferirRoteiro, reforcarNegocios, cabeNoHorarioEscrito, garantirImperdiveis, garantirInteresses } from '../services/verificacao.service'
 import { avisosParaConversa } from '../services/avisos.service'
 import { formatoDeConversa } from '../services/formato'
-import { ordenarEAcertarPeriodos, tirarEnchimento, ajustarHorarios, fecharTempos, garantirIdaParaEmbarque, cortarDepoisDaVolta, minutos as minutosDaHora, lerParadas as lerParadasDoTexto } from '../services/roteiro-texto'
+import { acertarReferenciasDeTrajeto, ordenarEAcertarPeriodos, tirarEnchimento, ajustarHorarios, fecharTempos, garantirIdaParaEmbarque, cortarDepoisDaVolta, minutos as minutosDaHora, lerParadas as lerParadasDoTexto } from '../services/roteiro-texto'
 import { geocodeDestination } from '../services/weather.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
@@ -506,6 +507,8 @@ export async function processMessage(
       toolReply = await handleRoteiroPersonalizado(phone, toolArgs as RoteiroPersonalizadoArgs, channel)
     } else if (toolName === 'consultar_meus_creditos') {
       toolReply = await handleConsultarCreditos(phone, channel)
+    } else if (toolName === 'trocar_parada') {
+      toolReply = await handleTrocarParada(phone, toolArgs, channel)
     } else if (toolName === 'ativar_guia') {
       toolReply = await handleAtivarGuia(phone, channel)
     } else if (toolName === 'pedir_foto_story') {
@@ -605,6 +608,34 @@ export async function receberFoto(
 }
 
 // ----------------------------------------------------------------
+// Handler: trocar_parada (a Guia troca UMA parada do roteiro pela conversa, com o mesmo serviço do botão "Trocar" do app)
+async function handleTrocarParada(phone: string, args: { parada?: string; dia?: number; pedido?: string }, channel: Canal = 'whatsapp'): Promise<string> {
+  const conversation = await getOrCreateConversation(phone)
+  if (!conversation.hasCompanion) return responder(phone, channel, 'Trocar parada pela conversa é um recurso da Guia Sol. No app, você pode abrir o roteiro e ver as opções.', 500)
+  const itinerary = await getLatestItinerary(phone)
+  if (!itinerary?.rawItinerary) return responder(phone, channel, 'Não achei um roteiro seu para mexer. Quer montar um?', 500)
+  const { linhas, paradas } = lerParadasDoTexto(itinerary.rawItinerary)
+  const norm = (t: string) => t.replace(/\*/g, '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()
+  const pedida = norm(String(args.parada ?? ''))
+  const dia = Number.isInteger(args.dia) && (args.dia as number) >= 1 ? (args.dia as number) - 1 : null
+  const palavras = pedida.split(' ').filter(w => w.length >= 4)
+  const pontos = (nome: string) => { const n = norm(nome); return n === pedida ? 100 : n.includes(pedida) || (pedida.length >= 5 && pedida.includes(n)) ? 50 : palavras.filter(w => n.includes(w)).length }
+  const candidatas = paradas.filter(p => dia === null || p.dia === dia).map(p => ({ p, pts: pedida ? pontos(p.nome) : 0 })).filter(x => x.pts > 0).sort((a, b) => b.pts - a.pts)
+  const lista = (ps: typeof paradas) => ps.map(p => `• Dia ${p.dia + 1}, ${p.hora}: ${p.nome.replace(/\*/g, '')}`).join('\n')
+  if (!candidatas.length || (candidatas.length > 1 && candidatas[0].pts === candidatas[1].pts)) {
+    const opcoes = candidatas.length ? candidatas.filter(c => c.pts === candidatas[0].pts).map(c => c.p) : paradas.filter(p => dia === null ? true : p.dia === dia).slice(0, 12)
+    return responder(phone, channel, `Qual parada você quer trocar? Me diz o nome ou o horário:\n${lista(opcoes)}`, 500)
+  }
+  const alvo = candidatas[0].p
+  const r = await trocarAtividade(phone, itinerary.id, alvo.dia, alvo.indice, alvo.nome, 'outro', typeof args.pedido === 'string' && args.pedido.trim() ? args.pedido.trim() : undefined)
+  if ('erro' in r) return responder(phone, channel, `Não consegui trocar agora (${r.erro}). Você também pode trocar pelo app: abre o roteiro, toca na parada e depois em *Trocar*.`, 500)
+  const novo = lerParadasDoTexto(r.texto)
+  const nova = novo.paradas.filter(p => p.dia === alvo.dia)[alvo.indice]
+  const detalhe = nova ? novo.linhas.slice(nova.inicio, nova.fim).filter(l => /^(🕒|💰|🚗)/.test(l.trim())).map(l => l.trim()).join('\n') : ''
+  void linhas
+  return responder(phone, channel, `Pronto, troquei *${alvo.nome.replace(/\*/g, '')}* por *${r.nova}* (dia ${alvo.dia + 1}, ${nova?.hora ?? alvo.hora}).${detalhe ? `\n${detalhe}` : ''}\n\nO roteiro no app já está atualizado: ${config.appPublicUrl}/app/roteiro`, 600)
+}
+
 // Handler: ativar_guia
 // ----------------------------------------------------------------
 async function handleAtivarGuia(phone: string, channel: Canal = 'whatsapp'): Promise<string> {
@@ -1067,9 +1098,13 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     // Cartão-postal do destino que ficou de fora entra antes da conferência (que valida horário e lugar).
     // Viagem de negócios não passa por aqui: o dia é de trabalho.
     const perfilDaPessoa = `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`
+    // Interesse principal do pedido que ficou sem nenhuma parada entra no lugar de uma parada de passeio comum
+    const interessesDoPedido = touristProfile?.match(/interesses[^:]*:\s*([^|]+?)(?:,\s*or[cç]amento|\s*\||$)/i)?.[1]?.split(/\s*,\s*/).filter(Boolean) ?? []
+    const comInteresses = ehNegocios || !interessesDoPedido.length ? { texto: textoBase, incluidos: [] as string[] }
+      : await garantirInteresses(textoBase, { destino: dest, datas: datasDaViagem, perfil: perfilDaPessoa, interesses: interessesDoPedido, phone, itineraryId: latestIt?.id }).catch(() => ({ texto: textoBase, incluidos: [] as string[] }))
     const postais = ehNegocios ? { texto: textoBase, lista: [] as string[], incluido: null as string | null }
-      : await garantirImperdiveis(textoBase, { destino: dest, datas: datasDaViagem, perfil: perfilDaPessoa, evitar: [...(contexto?.naoGostou ?? []), ...(contexto?.jaFeitos ?? []), ...(latestIt?.visitedNotes ? latestIt.visitedNotes.split('\n') : [])], phone, itineraryId: latestIt?.id })
-          .catch(() => ({ texto: textoBase, lista: [] as string[], incluido: null as string | null }))
+      : await garantirImperdiveis(comInteresses.texto, { destino: dest, datas: datasDaViagem, perfil: perfilDaPessoa, evitar: [...(contexto?.naoGostou ?? []), ...(contexto?.jaFeitos ?? []), ...(latestIt?.visitedNotes ? latestIt.visitedNotes.split('\n') : [])], phone, itineraryId: latestIt?.id })
+          .catch(() => ({ texto: comInteresses.texto, lista: [] as string[], incluido: null as string | null }))
     const conferido = await log.timed(phone, 'conferencia-google', () =>
       conferirRoteiro(postais.texto, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem, chegadaMin, saidaMin: departureTime ? minutosDaHora(departureTime) : (transportMode === 'local' || !transportMode ? 22 * 60 : null) })
     )
@@ -1077,7 +1112,9 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     // Os reparos podem ter mudado horários: o dia volta para a ordem de hora e o período do cabeçalho acompanha
     const emOrdem = ordenarEAcertarPeriodos(conferido.texto)
     if (emOrdem.reordenados || emOrdem.periodos) log.info('roteiro reordenado por horário', { phone, step: 'verificacao', data: { dias: emOrdem.reordenados, periodos: emOrdem.periodos } })
-    const tempos = fecharTempos(emOrdem.texto, cabeNoHorarioEscrito)
+    // A linha do trajeto não pode citar parada que saiu do roteiro ou que não é mais a anterior
+    const referencias = acertarReferenciasDeTrajeto(emOrdem.texto)
+    const tempos = fecharTempos(referencias.texto, cabeNoHorarioEscrito)
     if (tempos.ajustes.length) log.info('tempos no local encurtados para caber', { phone, step: 'verificacao', data: { ajustes: tempos.ajustes } })
     // Trava de segurança: os ajustes nunca podem mudar o número de dias. Se mudou (bloco da IA fora do
     // formato), vale o texto de antes da conferência, que tem a estrutura certa.
@@ -1100,6 +1137,7 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
         gostosDoCadastro: contexto?.gostos ?? [], roteirosAnterioresNoDestino: contexto?.jaFeitos?.length ?? 0, eventosNasDatas: contexto?.eventos?.length ?? 0,
         partiuDeOndeEstava: !!contexto?.partida, modelo: config.google.model,
         cartoesPostais: postais.lista, cartaoPostalIncluido: postais.incluido,
+        interessesIncluidosDepois: comInteresses.incluidos,
         conferencia: { paradas: conferido.paradas, ok: conferido.ok, trocadas: conferido.trocadas, reprovadas: conferido.reprovadas ?? [] },
         ajustes: { tiradas: semEnchimento.tiradas, horarios: acertado.ajustes, tempos: tempos.ajustes },
       }

@@ -218,7 +218,8 @@ export function acertarCabecalho(bloco: string[], alvo: { periodo: string; hora:
   const min = minutos(alvo.hora)
   if (!nome || /:$/.test(nome) || min === null) return semDia
   const periodo = min < 12 * 60 ? ['☀️', 'Manhã'] : min < 18 * 60 ? ['🌤️', 'Tarde'] : ['🌙', 'Noite']
-  return [`${periodo[0]} *${periodo[1]} (${alvo.hora}):* *${nome}*`, ...bloco.slice(1).filter(l => !ehDia(l))]
+  const nomeLimpo = nome.replace(/^(?:[\u2600-\u27BF\u{1F300}-\u{1FAFF}]\uFE0F?\s*)+/u, '') || nome // sem símbolo no começo do nome
+  return [`${periodo[0]} *${periodo[1]} (${alvo.hora}):* *${nomeLimpo}*`, ...bloco.slice(1).filter(l => !ehDia(l))]
 }
 
 // Parada que não diz QUAL lugar é ("Almoço em restaurante local", "Jantar livre"): não dá para
@@ -369,4 +370,28 @@ export function ordenarEAcertarPeriodos(texto: string): { texto: string; reorden
     return `${m[1]}${emoji} *${nome} (${m[4]}):*${m[5]}`
   })
   return { texto: saida.join('\n'), reordenados, periodos }
+}
+
+// Depois de trocas e reordenações, a linha 🚗 pode citar uma parada que saiu do roteiro ou que não é mais a
+// anterior ("~19 min de carro de Restaurante Atlântico", que foi trocado). O nome citado passa a ser o da
+// parada anterior de verdade. Não mexe na primeira parada do dia nem em "de onde você está"/"da sua hospedagem".
+export function acertarReferenciasDeTrajeto(texto: string): { texto: string; acertadas: number } {
+  const { linhas, paradas } = lerParadas(texto)
+  const norm = (t: string) => t.replace(/\*/g, '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()
+  let acertadas = 0
+  for (const p of paradas) {
+    const anterior = paradas.filter(x => x.dia === p.dia && x.inicio < p.inicio).pop()
+    if (!anterior) continue
+    for (let i = p.inicio; i < p.fim; i++) {
+      const m = linhas[i].match(/^(\s*🚗.*?(?:de carro|a p[eé]|de [oô]nibus|de barco|de t[aá]xi|de app|de metr[oô]|de bicicleta)(?:\s*\([^)]*\))?\s+)(?:d[eoa]s?|at[eé])\s+(.+?)\s*$/i)
+      if (!m) continue
+      const citado = norm(m[2]), certo = norm(anterior.nome)
+      if (!citado || /onde voce esta|sua hospedagem|seu hotel|aeroporto de origem|sua casa/.test(citado)) break
+      if (citado === certo || citado.includes(certo) || certo.includes(citado)) break
+      linhas[i] = `${m[1]}de ${anterior.nome.replace(/\*/g, '')}`
+      acertadas++
+      break
+    }
+  }
+  return { texto: linhas.join('\n'), acertadas }
 }
