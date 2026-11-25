@@ -32,6 +32,7 @@ import { criarCompra, gerarPix, gerarCheckout, lerPagamento, conferirNaAbacate, 
 import { confirmarPagamento } from '../services/pagamento-entrega.service'
 import { vincularConvite, resumoIndicacao, resgatarDiasGuia, limparPrazoGuia } from '../services/indicacao.service'
 import prisma from '../services/database.service'
+import { geocodeDestination } from '../services/weather.service'
 import { salvarFotoPerfil } from '../services/perfil-foto.service'
 
 const router = Router()
@@ -238,7 +239,7 @@ router.get('/api/app/perfil', clientAuthMiddleware, async (req: Request, res: Re
       // Prazo da Guia: ativa até quando, dias que faltam e, se acabou, quando (o app avisa e oferece renovar)
       guia: await estadoDaGuia(phone, conv.hasCompanion),
       mural: null, // o link do mural inteiro deixou de existir (RA-FOT-05); o álbum traz o link de cada viagem
-      itinerary: itinerary
+      itinerary: itinerary?.rawItinerary
         ? { id: itinerary.id, days: itinerary.days, status: itinerary.status, pdfUrl: itinerary.pdfUrl }
         : null,
     })
@@ -441,7 +442,8 @@ router.post('/api/app/roteiro/trocar', clientAuthMiddleware, async (req: Request
   if (!id || !Number.isInteger(dia) || dia < 0 || dia > 30 || !Number.isInteger(indice) || indice < 0 || indice > 40) { res.status(400).json({ error: 'Informe a atividade' }); return }
   // Trocar atividade é recurso da Guia Sol (RA-ROT-07)
   if (!(await getOrCreateConversation(phone)).hasCompanion) { res.status(403).json({ error: 'Trocar atividade é um recurso da Guia Sol.' }); return }
-  if (excedeu('troca-roteiro', phone, 3, 60_000) || !podeHoje('troca-roteiro', `${phone}:${id}`, 12)) { res.status(429).json({ error: 'Muitas trocas neste roteiro por hoje. Tente amanhã ou peça pela conversa com a Sol.' }); return }
+  if (excedeu('troca-roteiro', phone, 3, 60_000)) { res.status(429).json({ error: 'Muitas trocas em seguida. Espere um minuto e tente de novo.' }); return }
+  if (!podeHoje('troca-roteiro', `${phone}:${id}`, 12)) { res.status(429).json({ error: 'Muitas trocas neste roteiro por hoje. Tente amanhã ou peça pela conversa com a Sol.' }); return }
   try {
     const r = await trocarAtividade(phone, id, dia, indice, nome, motivo)
     if ('erro' in r) { res.status(r.status).json({ error: r.erro }); return }
@@ -596,6 +598,17 @@ router.get('/api/app/roteiros', clientAuthMiddleware, async (req: Request, res: 
   }
 })
 
+// Conta que ainda não pode usar roteiros e compras: sem aceite dos termos, ou menor de 18 anos (RA-CAD).
+// Devolve a mensagem para a pessoa, ou null se está tudo certo.
+const idadeEm = (nasc: string) => { const h = new Date(); const n = new Date(`${nasc}T12:00:00Z`); let i = h.getUTCFullYear() - n.getUTCFullYear(); if (h.getUTCMonth() < n.getUTCMonth() || (h.getUTCMonth() === n.getUTCMonth() && h.getUTCDate() < n.getUTCDate())) i--; return i }
+async function barreiraDeConta(phone: string): Promise<string | null> {
+  if (config.revisor.phone && phone === config.revisor.phone) return null
+  const [aceites, cadastro] = await Promise.all([consentimentos(phone), lerCadastro(phone)])
+  if (!aceites.termos?.aceito) return 'Para continuar, aceite os termos de uso no cadastro do app.'
+  if (cadastro.nascimento && idadeEm(cadastro.nascimento) < 18) return 'Conta de menor de 18 anos: roteiros e compras ficam liberados com o cadastro de um responsável.'
+  return null
+}
+
 // ─── POST /api/app/roteiros/criar ────────────────────────────────────────────
 // Tela "Criar roteiro": gera um roteiro a partir do formulário. A geração roda
 // em segundo plano; o app acompanha pela lista de roteiros.
@@ -610,6 +623,16 @@ router.post('/api/app/roteiros/criar', clientAuthMiddleware, async (req: Request
   // Data no passado (com 1 dia de folga para fusos a oeste de Brasília): recusa aqui, senão o app ficaria esperando um roteiro que não vem
   const ontem = new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
   if (b.chegada < ontem) { res.status(400).json({ error: 'A data de chegada já passou. Escolha uma data a partir de hoje.' }); return }
+  // Datas absurdas: mais de 2 anos à frente, ou voltar antes de chegar no mesmo dia
+  const limiteFuturo = new Date(Date.now() + 730 * 86400000).toISOString().slice(0, 10)
+  if (b.chegada > limiteFuturo) { res.status(400).json({ error: 'A data está longe demais. Escolha uma viagem nos próximos 2 anos.' }); return }
+  if (b.chegada === b.saida && hora.test(b.horaChegada) && hora.test(b.horaVolta) && b.horaVolta <= b.horaChegada) { res.status(400).json({ error: 'No mesmo dia, a hora da volta precisa ser depois da hora da chegada.' }); return }
+  // Termos aceitos e maioridade valem no servidor, não só na tela (uma falha de carregamento do perfil deixava passar)
+  const barreira = await barreiraDeConta(phone)
+  if (barreira) { res.status(403).json({ error: barreira }); return }
+  // O destino precisa existir no mapa ("asdfgh" gerava uma viagem fantasma que não abria). Falha de rede não barra.
+  const destinoExiste = await geocodeDestination(b.destino.trim()).then(() => true).catch((err: Error) => !/não encontrado para geocodifica/i.test(err.message))
+  if (!destinoExiste) { res.status(400).json({ error: 'Não encontrei esse destino. Confira o nome da cidade (ex.: "Recife - PE").' }); return }
   // Duração máxima: 5 dias sem a Guia, 7 com a Guia (RA-ROT-24)
   const conv = await getOrCreateConversation(phone)
   const maxDias = conv.hasCompanion ? config.regras.maxDiasComGuia : config.regras.maxDiasSemGuia
@@ -738,6 +761,12 @@ router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res:
   const { nome, nascimento, concluir, gostos, viagem, lugaresDesejados, convite } = req.body ?? {}
   if (nascimento !== undefined && (typeof nascimento !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(nascimento) || nascimento > new Date().toISOString().slice(0, 10) || nascimento < '1900-01-01')) {
     res.status(400).json({ error: 'Data de nascimento inválida' }); return
+  }
+  // Quem informou uma data de menor de idade não troca a data sozinho (a tela restrita deixava refazer o
+  // cadastro com outro ano e virar conta completa): a correção passa pelo suporte
+  if (nascimento !== undefined) {
+    const atual = (await lerCadastro(phone)).nascimento
+    if (atual && atual !== nascimento && idadeEm(atual) < 18) { res.status(409).json({ error: 'A data de nascimento já foi informada. Se estiver errada, fale com o suporte da Sol para corrigir.' }); return }
   }
   // Onboarding: gostos (tipos de passeio), viagem em mente e lugares que quer conhecer
   const textos = (v: unknown, max: number, tam: number) =>
@@ -881,6 +910,7 @@ router.post('/api/app/pagamento', clientAuthMiddleware, async (req: Request, res
   const tipo = b.tipo as TipoCompra
   if (!['roteiro', 'guia_dia', 'guia_mes'].includes(tipo)) { res.status(400).json({ error: 'Tipo de compra inválido' }); return }
   if (excedeu('pagamento', phone, 8, 600_000)) { res.status(429).json({ error: 'Muitas tentativas. Espere um pouco.' }); return }
+  { const barreira = await barreiraDeConta(phone); if (barreira) { res.status(403).json({ error: barreira }); return } }
   try {
     let dias = 1
     let pedido: unknown

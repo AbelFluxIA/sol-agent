@@ -139,11 +139,19 @@ const hojeBrasil = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Ame
 
 export async function estadoDoAlbum(phone: string): Promise<EstadoAlbum> {
   const conv = await getOrCreateConversation(phone)
-  const it = await prisma.itinerary.findFirst({
-    where: { conversationId: conv.id, arrivalDate: { not: null } },
-    orderBy: { createdAt: 'desc' },
+  // A viagem que vale é a que está EM ANDAMENTO hoje; sem ela, a próxima; sem ela, a última que passou.
+  // (Antes valia o roteiro criado por último: planejar a próxima viagem travava as fotos da viagem de hoje.)
+  const hojeIso = hojeBrasil()
+  const todos = await prisma.itinerary.findMany({
+    where: { conversationId: conv.id, arrivalDate: { not: null }, rawItinerary: { not: null } },
+    orderBy: { createdAt: 'desc' }, take: 40,
     select: { destination: true, arrivalDate: true, departureDate: true },
   })
+  const fim = (x: { arrivalDate: string | null; departureDate: string | null }) => x.departureDate ?? x.arrivalDate ?? ''
+  const it = todos.find(x => x.arrivalDate! <= hojeIso && hojeIso <= fim(x))
+    ?? [...todos].filter(x => x.arrivalDate! > hojeIso).sort((a, b) => a.arrivalDate!.localeCompare(b.arrivalDate!))[0]
+    ?? [...todos].sort((a, b) => fim(b).localeCompare(fim(a)))[0]
+    ?? null
   const viagem = it?.arrivalDate ? { destino: it.destination, chegada: it.arrivalDate, saida: it.departureDate ?? it.arrivalDate } : null
   if (!conv.hasCompanion) return { podeEnviar: false, motivo: 'sem_guia', viagem }
   const hoje = hojeBrasil()

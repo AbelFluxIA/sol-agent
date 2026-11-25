@@ -69,7 +69,13 @@ export async function criarLinkDaViagem(phone: string, alvo: { inicio?: string; 
   let itineraryId: string | null = null
 
   if (alvo.inicio) {
-    const grupo = (await getAlbum(phone)).grupos.find(g => g.inicio === alvo.inicio)
+    // O início do grupo muda quando a pessoa apaga a foto mais antiga: vale o grupo que contém esse momento
+    // ou, na falta, o mais próximo (até 3 dias), em vez de exigir o valor exato
+    const grupos = (await getAlbum(phone)).grupos
+    const t = Date.parse(alvo.inicio)
+    const grupo = grupos.find(g => g.inicio === alvo.inicio)
+      ?? (Number.isFinite(t) ? grupos.find(g => Date.parse(g.inicio) <= t && t <= Date.parse(g.fim))
+        ?? grupos.map(g => ({ g, d: Math.min(Math.abs(Date.parse(g.inicio) - t), Math.abs(Date.parse(g.fim) - t)) })).filter(x => x.d <= 3 * DIA_MS).sort((a, b) => a.d - b.d)[0]?.g : undefined)
     if (!grupo) return null
     periodo = { de: new Date(grupo.inicio), ate: new Date(grupo.fim) }
     // O roteiro daquelas datas dá o destino e a imagem de capa, e estica o período
