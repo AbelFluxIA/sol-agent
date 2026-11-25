@@ -340,6 +340,10 @@ Se o perfil mencionar o estilo de orçamento, siga rigorosamente:
 - *Premium*: priorize experiências exclusivas, restaurantes bem avaliados, translados por app, atividades especiais, hotéis de destaque. Não economize na experiência.
 Equivalências usadas pelo app: "econômico" = Econômico; "melhor custo-benefício" = Equilibrado; "conforto" = acima do Equilibrado (priorize qualidade, comodidade e lugares bem avaliados, sem luxo desnecessário). Ao falar com a pessoa, use a palavra que ela escolheu.
 Se não houver informação de orçamento, assuma Equilibrado.
+ECONÔMICO vale principalmente para COMER: almoço e jantar em lugar simples e barato de verdade (prato feito, self-service por quilo, lanchonete, mercado municipal, comida de rua, pastelaria), com refeição de até R$ 45 por pessoa. Com orçamento econômico NUNCA escolha rodízio, churrascaria de rodízio, steakhouse, bistrô, restaurante de hotel, frutos do mar caros ou "gastronomia". Na linha 💰 escreva o preço real do prato mais comum da casa; se passar de R$ 45, troque de lugar.
+
+# REGRA #5B: CARTÕES-POSTAIS DO DESTINO (CRÍTICO)
+Todo destino tem de 1 a 3 atrações que praticamente todo visitante faz (ex.: Cataratas em Foz do Iguaçu, Cristo Redentor e Pão de Açúcar no Rio, Pelourinho em Salvador, Farol da Barra, Jardim Botânico de Curitiba). Elas ENTRAM no roteiro, no melhor dia e horário, qualquer que seja o perfil ou o orçamento, a menos que a pessoa tenha dito que já foi, que não quer, ou que o horário de chegada e de saída não permita. Se a atração é paga e o orçamento é econômico, inclua assim mesmo, escreva o preço e compense nas refeições e no transporte. Um roteiro de Foz sem as Cataratas está ERRADO.
 
 # REGRA #6: PERSONALIZAÇÃO REAL (OBRIGATÓRIO)
 O perfil do turista DEVE ditar o tipo de atividade dominante na agenda. Cada perfil tem venues primários (mínimo 50% das atividades) e venues complementares (restaurantes, 1-2 atrações próximas).

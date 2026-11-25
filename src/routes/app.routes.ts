@@ -313,7 +313,10 @@ router.post('/api/app/chat', clientAuthMiddleware, async (req: Request, res: Res
   if (excedeu('chat', phone, 20, 60_000)) { res.status(429).json({ error: 'Calma, uma mensagem de cada vez. Espere um minuto.' }); return }
   try {
     cancelGuiaReminder(phone)
-    const reply = await processMessage(phone, message.trim(), 'app')
+    // Posição do celular (o app manda junto quando a pessoa já liberou a localização): não entra na conversa
+    const lat = Number(req.body?.posicao?.lat), lng = Number(req.body?.posicao?.lng)
+    const posicao = Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && (lat !== 0 || lng !== 0) ? { lat, lng } : undefined
+    const reply = await processMessage(phone, message.trim(), 'app', { posicao })
     res.json({ reply: formatoDeConversa(reply ?? 'Tudo certo!') })
   } catch (err) {
     log.error('erro no chat do app', err, { phone, step: 'app-chat' })

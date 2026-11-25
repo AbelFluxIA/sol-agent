@@ -162,7 +162,7 @@ export async function generateItineraryText(params: GenerateItineraryParams): Pr
   const blocoPessoa =
     lista('Gostos marcados no cadastro (secundários: os interesses DESTE pedido, no Perfil, têm prioridade)', contexto?.gostos) +
     lista('Lugares que disse que quer conhecer (priorize se ficarem neste destino)', contexto?.lugaresDesejados) +
-    lista('Lugares que JÁ FEZ neste destino em roteiros anteriores (NÃO repita)', contexto?.jaFeitos) +
+    lista('Lugares que estavam no roteiro de uma viagem ANTERIOR a este destino (varie os restaurantes e as atrações secundárias; os cartões-postais do destino continuam valendo, salvo se a pessoa disse que já foi)', contexto?.jaFeitos) +
     lista('Atividades que avaliou como GOSTEI (busque parecidas)', contexto?.gostou) +
     lista('Atividades que avaliou como NÃO GOSTEI (evite parecidas)', contexto?.naoGostou)
   const eventosSection = contexto?.eventos?.length

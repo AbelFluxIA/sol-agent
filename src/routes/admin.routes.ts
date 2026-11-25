@@ -300,7 +300,9 @@ router.get(`${A}/roteiro`, adminAppAuth, async (req: Request, res: Response) => 
     const r = await prisma.itinerary.findUnique({ where: { id }, select: { id: true, destination: true, arrivalDate: true, departureDate: true, days: true, status: true, createdAt: true, pdfUrl: true, rawItinerary: true, conversation: { select: { phone: true, name: true } } } })
     if (!r) { res.status(404).json({ error: 'Roteiro não encontrado' }); return }
     registrar(req, 'roteiro visto', r.conversation.phone, { id })
-    res.json({ id: r.id, destino: r.destination, chegada: r.arrivalDate, saida: r.departureDate, dias: r.days, status: r.status, criadoEm: r.createdAt, pdfUrl: r.pdfUrl, texto: r.rawItinerary, phone: r.conversation.phone, nome: r.conversation.name })
+    // O que foi usado para montar o roteiro (perfil escolhido, conferência, cartão-postal). Roteiros antigos só têm o perfil.
+    const [extra] = await prisma.$queryRaw<{ configuracao: unknown; perfil: string | null; grupo: string | null }[]>`select configuracao, "touristProfile" perfil, "groupType" grupo from "Itinerary" where id = ${id}`
+    res.json({ configuracao: extra?.configuracao ?? null, perfil: extra?.perfil ?? null, grupo: extra?.grupo ?? null, id: r.id, destino: r.destination, chegada: r.arrivalDate, saida: r.departureDate, dias: r.days, status: r.status, criadoEm: r.createdAt, pdfUrl: r.pdfUrl, texto: r.rawItinerary, phone: r.conversation.phone, nome: r.conversation.name })
   } catch (err) { erro(res, err, 'roteiro') }
 })
 

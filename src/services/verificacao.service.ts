@@ -16,9 +16,9 @@ import { perguntarAoGemini } from './gemini'
 import { lerParadas, ehLogistica, ehGenerico, minutos, duracaoMin, trajetoMin, ajustarHorarios, acertarCabecalho, type Parada } from './roteiro-texto'
 
 const API = 'https://places.googleapis.com/v1'
-type Estado = 'ok' | 'nao-encontrado' | 'fechado' | 'fechado-no-horario' | 'mal-avaliado' | 'sem-dados' | 'generico' | 'repetido'
+type Estado = 'ok' | 'nao-encontrado' | 'fechado' | 'fechado-no-horario' | 'mal-avaliado' | 'sem-dados' | 'generico' | 'repetido' | 'caro' | 'imperdivel'
 interface Ponto { lat: number; lng: number }
-export interface Conferencia { parada: Parada; estado: Estado; ponto: Ponto | null }
+export interface Conferencia { parada: Parada; estado: Estado; ponto: Ponto | null; motivo?: string }
 
 // Teto de consultas por dia (cada Place Details com horário e nota é cobrado)
 let diaConta = ''
@@ -49,9 +49,9 @@ export function abertoEm(periodos: Periodo[] | undefined, diaSemana: number, min
   return false
 }
 
-export interface DadosDoLugar { id: string; estado?: string; ponto: Ponto | null; periodos?: Periodo[]; periodosDaSemana?: Periodo[]; abertoAgora?: boolean; horarios?: string[]; nota?: number; avaliacoes?: number; mapsUrl?: string }
+export interface DadosDoLugar { id: string; estado?: string; ponto: Ponto | null; periodos?: Periodo[]; periodosDaSemana?: Periodo[]; abertoAgora?: boolean; horarios?: string[]; nota?: number; avaliacoes?: number; mapsUrl?: string; preco?: string }
 // Lê o lugar no Google. Dados de uso imediato: NÃO gravar (regra do Google).
-export async function lerLugar(texto: string, perto: Ponto | null, campos = 'id,businessStatus,location,regularOpeningHours.periods,rating,userRatingCount'): Promise<DadosDoLugar | null> {
+export async function lerLugar(texto: string, perto: Ponto | null, campos = 'id,businessStatus,location,regularOpeningHours.periods,rating,userRatingCount,priceLevel'): Promise<DadosDoLugar | null> {
   const id = await placeId(texto, perto)
   if (!id) return null
   const { data } = await axios.get(`${API}/places/${encodeURIComponent(id)}`, { headers: { 'X-Goog-Api-Key': config.googlePlaces.apiKey, 'X-Goog-FieldMask': campos }, params: { languageCode: 'pt-BR' }, timeout: 10000 })
@@ -66,6 +66,7 @@ export async function lerLugar(texto: string, perto: Ponto | null, campos = 'id,
     nota: data?.rating,
     avaliacoes: data?.userRatingCount,
     mapsUrl: data?.googleMapsUri,
+    preco: data?.priceLevel, // PRICE_LEVEL_INEXPENSIVE | MODERATE | EXPENSIVE | VERY_EXPENSIVE
   }
 }
 
@@ -91,7 +92,25 @@ async function lerLugarRecente(consulta: string, centro: Ponto | null): Promise<
 }
 const chaveDoLugar = (nome: string) => nome.replace(/\*/g, '').replace(/^(almo[cç]o|jantar|caf[eé]( da manh[aã])?|lanche)\s+(n[oa]s?|em)\s+/i, '').replace(/\s*\(.*?\)\s*/g, ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 
-async function conferir(texto: string, destino: string, datas: string[], centro: Ponto | null, soDia?: number): Promise<Conferencia[]> {
+// Orçamento econômico: a refeição não pode ser em lugar caro. Vale o nível de preço do Google, o próprio
+// custo escrito no roteiro (acima de R$ 60 por pessoa) e nomes que já dizem o preço (rodízio, steakhouse...).
+const EH_COMIDA = /restaurante|almo[cç]o|jantar|churrasc|bistr|pizzar|cantina|lanchonete|padaria|buffet|cozinha|gastr|hamburg|sushi|japon|parrilla|steak|rod[ií]zio|caf[eé]\b|bar\b|boteco|peixaria|marisc/i
+const NOME_CARO = /rod[ií]zio|steak\s?house|bistr[oô]|gourmet|omakase|parrilla|fine dining|alta gastronomia/i
+function custoMaximo(bloco: string[]): number | null {
+  const linha = bloco.find(l => l.includes('💰'))
+  if (!linha || /gr[aá]tis|gratuit/i.test(linha)) return null
+  const valores = [...linha.matchAll(/R\$\s*(\d{1,4})(?:[.,]\d{2})?/g)].map(m => Number(m[1]))
+  return valores.length ? Math.max(...valores) : null
+}
+export function caroParaEconomico(nome: string, bloco: string[], preco?: string): boolean {
+  if (!EH_COMIDA.test(nome) && !bloco.some(l => l.includes('💬') && /almo[cç]o|jantar|refei[cç][aã]o/i.test(l))) return false
+  if (preco === 'PRICE_LEVEL_EXPENSIVE' || preco === 'PRICE_LEVEL_VERY_EXPENSIVE') return true
+  if (NOME_CARO.test(nome)) return true
+  const max = custoMaximo(bloco)
+  return max !== null && max > 60
+}
+
+async function conferir(texto: string, destino: string, datas: string[], centro: Ponto | null, soDia?: number, economico = false): Promise<Conferencia[]> {
   const { paradas, linhas } = lerParadas(texto)
   const alvo = paradas.filter(p => !ehLogistica(p.nome) && (soDia === undefined || p.dia === soDia)).slice(0, 24)
   const saida: Conferencia[] = []
@@ -119,6 +138,7 @@ async function conferir(texto: string, destino: string, datas: string[], centro:
         }
         // Mesmo aberto no Google: o horário escrito no próprio roteiro precisa comportar a visita
         if ((estado === 'ok' || estado === 'sem-dados') && !cabeNoHorarioEscrito(linhas.slice(p.inicio, p.fim), p.hora)) estado = 'fechado-no-horario'
+        if (economico && (estado === 'ok' || estado === 'sem-dados') && caroParaEconomico(p.nome, linhas.slice(p.inicio, p.fim), l.preco)) estado = 'caro'
         saida.push({ parada: p, estado, ponto: l.ponto })
       } catch (err) {
         saida.push({ parada: p, estado: 'sem-dados', ponto: null })
@@ -162,6 +182,7 @@ const MOTIVO: Record<string, string> = {
   'mal-avaliado': 'o lugar é mal avaliado pelos visitantes',
   generico: 'a parada não diz QUAL lugar é (nome genérico): escolha um lugar real, com nome, na mesma região em que a pessoa está nesse momento do dia (veja a parada anterior)',
   repetido: 'este lugar JÁ APARECE antes no roteiro: escolha outro lugar, diferente de todos os que já estão nele',
+  caro: 'é CARO para o orçamento ECONÔMICO da pessoa: escolha um lugar simples e barato de verdade para comer (prato feito, self-service por quilo, lanchonete, mercado municipal, pastelaria, comida de rua), com refeição de até R$ 45 por pessoa, e escreva na linha 💰 o preço real. Nada de rodízio, steakhouse, bistrô ou restaurante de hotel',
 }
 
 // Pede à IA blocos novos para as paradas reprovadas e encaixa no texto
@@ -172,7 +193,7 @@ async function reparar(texto: string, ruins: Conferencia[], destino: string, per
     const ant = doDia.filter(x => x.inicio < p.inicio).pop(), prox = doDia.find(x => x.inicio > p.inicio)
     return `Parada anterior: ${ant ? `${ant.nome.replace(/\*/g, '')} às ${ant.hora}` : 'nenhuma (é a primeira do dia)'}. Próxima: ${prox ? `${prox.nome.replace(/\*/g, '')} às ${prox.hora}` : 'nenhuma (é a última do dia)'}.`
   }
-  const lista = ruins.map((c, i) => `${i + 1}. "${c.parada.nome}" (dia ${c.parada.dia + 1}, ${datas[Math.min(c.parada.dia, datas.length - 1)] ?? ''}, ${c.parada.periodo} ${c.parada.hora}): ${MOTIVO[c.estado]}.\n${vizinhas(c.parada)}\nBloco atual:\n${linhas.slice(c.parada.inicio, c.parada.fim).join('\n')}`).join('\n\n')
+  const lista = ruins.map((c, i) => `${i + 1}. "${c.parada.nome}" (dia ${c.parada.dia + 1}, ${datas[Math.min(c.parada.dia, datas.length - 1)] ?? ''}, ${c.parada.periodo} ${c.parada.hora}): ${c.motivo ?? MOTIVO[c.estado]}.\n${vizinhas(c.parada)}\nBloco atual:\n${linhas.slice(c.parada.inicio, c.parada.fim).join('\n')}`).join('\n\n')
   const prompt = `Você revisa um roteiro de viagem em ${destino}. Perfil da pessoa: ${perfil}.
 As paradas abaixo foram REPROVADAS na conferência. Para CADA uma, escolha OUTRO lugar REAL (não o mesmo lugar com outro nome nem outra entrada do mesmo atrativo), do mesmo tipo (restaurante por restaurante, atração por atração), perto, ABERTO nesse dia da semana e horário (confirme no Google Search) e bem avaliado. Use o NOME OFICIAL do lugar como aparece no Google Maps.
 
@@ -209,6 +230,57 @@ Sem comentários antes ou depois.`
   }
   log.info('paradas reprovadas trocadas', { phone, step: 'verificacao', data: { reprovadas: ruins.length, trocadas } })
   return novo.join('\n')
+}
+
+// ─── Cartões-postais do destino ──────────────────────────────────────────────
+// A atração que quase todo visitante faz (Cataratas em Foz, Cristo no Rio) tem de estar no roteiro.
+// A lista vem de uma pergunta curta à IA, guardada 24 h por destino. Se a principal ficou de fora,
+// ela entra no lugar de uma parada de passeio comum, e a conferência seguinte valida horário e existência.
+export interface Imperdivel { nome: string; chaves: string[] }
+const semAcento = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+const cacheImperdiveis = new Map<string, { em: number; lista: Imperdivel[] }>()
+export async function imperdiveisDe(destino: string, phone?: string, itineraryId?: string): Promise<Imperdivel[]> {
+  const chave = semAcento(destino)
+  const hit = cacheImperdiveis.get(chave)
+  if (hit && Date.now() - hit.em < 24 * 3600_000) return hit.lista
+  const resposta = await perguntarAoGemini(`Liste as atrações turísticas IMPERDÍVEIS de ${destino}: só as que praticamente todo visitante de primeira viagem faz (os cartões-postais do lugar), no máximo 3, da mais importante para a menos. Não inclua restaurante, hotel, bairro inteiro nem evento que só acontece numa época do ano. Se o destino não tiver atração desse porte, responda [].
+Responda SOMENTE com JSON, sem texto antes ou depois:
+[{"nome":"nome mais conhecido da atração","chaves":["1 ou 2 expressões curtas, em minúsculas e sem acento, que aparecem no nome da atração num roteiro (ex.: \"cataratas\", \"cristo redentor\")"]}]`, { callType: 'imperdiveis', phone, itineraryId, busca: false, maxTokens: 500, temperatura: 0.1, timeoutMs: 25_000 })
+  let lista: Imperdivel[] = []
+  try {
+    const json = JSON.parse((resposta.match(/\[[\s\S]*\]/) ?? ['[]'])[0])
+    if (Array.isArray(json)) lista = json.filter(x => x && typeof x.nome === 'string' && Array.isArray(x.chaves)).map(x => ({ nome: String(x.nome).slice(0, 80), chaves: x.chaves.filter((c: unknown) => typeof c === 'string').map((c: string) => semAcento(c).trim()).filter((c: string) => c.length >= 4).slice(0, 3) })).filter(x => x.chaves.length).slice(0, 3)
+  } catch { lista = [] }
+  cacheImperdiveis.set(chave, { em: Date.now(), lista })
+  if (cacheImperdiveis.size > 500) cacheImperdiveis.delete(cacheImperdiveis.keys().next().value as string)
+  return lista
+}
+
+export async function garantirImperdiveis(texto: string, o: { destino: string; datas: string[]; perfil: string; evitar?: string[]; phone?: string; itineraryId?: string }): Promise<{ texto: string; lista: string[]; incluido: string | null }> {
+  const lista = await imperdiveisDe(o.destino, o.phone, o.itineraryId)
+  const nada = { texto, lista: lista.map(i => i.nome), incluido: null }
+  if (!lista.length) return nada
+  const principal = lista[0]
+  const { paradas } = lerParadas(texto)
+  const passeios = paradas.filter(p => !ehLogistica(p.nome))
+  const bate = (i: Imperdivel, nome: string) => i.chaves.some(c => semAcento(nome).includes(c))
+  if (passeios.some(p => bate(principal, p.nome))) return nada
+  // A pessoa disse que já foi ou que não gostou: não insiste
+  if ((o.evitar ?? []).some(e => bate(principal, e))) return nada
+  // Sai uma parada de passeio comum (não refeição, não outro cartão-postal), de preferência de manhã
+  const candidatas = passeios.filter(p => { const m = minutos(p.hora); return m !== null && m >= 8 * 60 && m <= 15 * 60 && !EH_COMIDA.test(p.nome) && !lista.some(i => bate(i, p.nome)) })
+  if (passeios.length < 3 || !candidatas.length) return nada
+  const alvo = candidatas.find(p => (minutos(p.hora) ?? 0) <= 11 * 60) ?? candidatas[0]
+  const motivo = `esta parada dá lugar a "${principal.nome}", a atração mais importante de ${o.destino}, que ficou de FORA do roteiro. Escreva o bloco de "${principal.nome}" (exatamente esse lugar), com o funcionamento real nesse dia, o preço real do ingresso e o tempo que a visita pede. Pode mudar o horário para o melhor momento da visita, entre a parada anterior e a próxima`
+  try {
+    const novo = await reparar(texto, [{ parada: alvo, estado: 'imperdivel', ponto: null, motivo }], o.destino, o.perfil, o.datas, o.phone, o.itineraryId)
+    const entrou = lerParadas(novo).paradas.some(p => bate(principal, p.nome))
+    log.info(entrou ? 'cartão-postal do destino incluído no roteiro' : 'cartão-postal do destino não pôde ser incluído', { phone: o.phone, step: 'verificacao', data: { atracao: principal.nome, noLugarDe: alvo.nome.replace(/\*/g, '') } })
+    return entrou ? { texto: novo, lista: lista.map(i => i.nome), incluido: principal.nome } : nada
+  } catch (err) {
+    log.warn('inclusão do cartão-postal falhou', { phone: o.phone, step: 'verificacao', data: { error: (err as Error).message } })
+    return nada
+  }
 }
 
 // Perfil de NEGÓCIOS: a IA tende a encher o dia de passeio turístico mesmo com a instrução.
@@ -338,7 +410,7 @@ function anotar(texto: string, conf: Conferencia[], saida?: { ponto: Ponto; rotu
   return novo.join('\n')
 }
 
-export interface ResultadoConferencia { texto: string; paradas: number; ok: number; trocadas: number; semConferir: number; consultas: number }
+export interface ResultadoConferencia { texto: string; paradas: number; ok: number; trocadas: number; semConferir: number; consultas: number; reprovadas?: string[] }
 
 // Horários vazios no dia: mais de 3 horas sem nada entre duas paradas (até o meio da tarde) ou um dia
 // que acaba antes da noite sem jantar (menos o último, que tem a volta). Acontece quando a IA planeja
@@ -444,7 +516,8 @@ export async function conferirRoteiro(texto: string, o: { destino: string; datas
   if (!fotosLigadas() || process.env.ROTEIRO_SEM_CONFERENCIA === 'true' || process.env.MODO_CARGA === '1') return vazio
   const antes = consultasHoje
   try {
-    let conf = await conferir(texto, o.destino, o.datas, o.centro, o.soDia)
+    const economico = /or[cç]amento econ[oô]mic/i.test(o.perfil)
+    let conf = await conferir(texto, o.destino, o.datas, o.centro, o.soDia, economico)
     if (!conf.length) return vazio
     const ruins = conf.filter(c => c.estado !== 'ok' && c.estado !== 'sem-dados')
     let trocadas = 0
@@ -456,7 +529,7 @@ export async function conferirRoteiro(texto: string, o: { destino: string; datas
         const reparado = await reparar(atual, pendentes, o.destino, o.perfil, o.datas, o.phone, o.itineraryId)
         if (reparado === atual) break
         atual = ajustarHorarios(reparado, o.chegadaMin ?? null).texto
-        const depois = await conferir(atual, o.destino, o.datas, o.centro, o.soDia)
+        const depois = await conferir(atual, o.destino, o.datas, o.centro, o.soDia, economico)
         trocadas += pendentes.filter(r => !depois.some(d => d.parada.nome === r.parada.nome && d.parada.dia === r.parada.dia)).length
         conf = depois
         pendentes = conf.filter(c => c.estado !== 'ok' && c.estado !== 'sem-dados')
@@ -524,7 +597,7 @@ export async function conferirRoteiro(texto: string, o: { destino: string; datas
     const final = anotar(atual, conf, saida, o.destino)
     const r = { texto: final, paradas: conf.length, ok: conf.filter(c => c.estado === 'ok').length, trocadas, semConferir: conf.filter(c => c.estado !== 'ok').length, consultas: consultasHoje - antes }
     log.info('roteiro conferido no Google Maps', { phone: o.phone, step: 'verificacao', data: { ...r, texto: undefined, reprovadasAntes: ruins.map(x => `${x.parada.nome}: ${x.estado}`) } })
-    return r
+    return { ...r, reprovadas: ruins.map(x => `${x.parada.nome.replace(/\*/g, '')}: ${x.estado}`) }
   } catch (err) {
     log.warn('conferência do roteiro falhou', { phone: o.phone, step: 'verificacao', data: { error: (err as Error).message } })
     return vazio

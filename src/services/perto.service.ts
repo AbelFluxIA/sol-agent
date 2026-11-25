@@ -36,12 +36,17 @@ const distanciaM = (a: { lat: number; lng: number }, b: { lat: number; lng: numb
   return Math.round(2 * R * Math.asin(Math.sqrt(h)))
 }
 
+const NAO_E_PASSEIO = ['event_venue', 'convention_center', 'wedding_venue', 'banquet_hall', 'auditorium', 'corporate_office', 'stadium', 'arena',
+  // hospedagem não é lugar para ir agora
+  'hotel', 'lodging', 'motel', 'hostel', 'bed_and_breakfast', 'resort_hotel', 'inn', 'guest_house', 'extended_stay_hotel']
+const FESTA_DE_EPOCA = /oktoberfest|festa\s+(junina|do|da|de)\b|festival\b|carnaval|r[ée]veillon|natal luz|expo\s?\w+|rodeio|micareta/i
+
 async function buscar(pos: { lat: number; lng: number }, tipos: string[], raio: number): Promise<any[]> {
   const { data } = await axios.post(`${API}/places:searchNearby`, {
     includedTypes: tipos, maxResultCount: 20, rankPreference: 'POPULARITY', languageCode: 'pt-BR', regionCode: 'BR',
     locationRestriction: { circle: { center: { latitude: pos.lat, longitude: pos.lng }, radius: raio } },
   }, {
-    headers: { 'X-Goog-Api-Key': config.googlePlaces.apiKey, 'X-Goog-FieldMask': 'places.id,places.displayName,places.location,places.primaryTypeDisplayName,places.currentOpeningHours.openNow,places.businessStatus,places.rating,places.userRatingCount,places.googleMapsUri' },
+    headers: { 'X-Goog-Api-Key': config.googlePlaces.apiKey, 'X-Goog-FieldMask': 'places.id,places.displayName,places.location,places.primaryType,places.primaryTypeDisplayName,places.currentOpeningHours.openNow,places.businessStatus,places.rating,places.userRatingCount,places.googleMapsUri' },
     timeout: 12000,
   })
   return data?.places ?? []
@@ -65,6 +70,9 @@ export async function pertoDeMim(phone: string, pos: { lat: number; lng: number 
   const fora = evitar.map(n)
   const lista: LugarPerto[] = lugares
     .filter(l => l?.displayName?.text && l?.location && l.businessStatus !== 'CLOSED_PERMANENTLY' && l.businessStatus !== 'CLOSED_TEMPORARILY')
+    // Local de evento não é passeio do dia a dia: só tem o que fazer quando há evento (relato de 22/11:
+    // "Oktoberfest Blumenau" como "aberto agora" em novembro; a festa é só em outubro)
+    .filter(l => !NAO_E_PASSEIO.includes(String(l.primaryType ?? '')) && !FESTA_DE_EPOCA.test(String(l.displayName.text)))
     .map(l => ({
       nome: String(l.displayName.text).slice(0, 80), tipo: l.primaryTypeDisplayName?.text ?? null,
       lat: l.location.latitude, lng: l.location.longitude, metros: distanciaM(pos, { lat: l.location.latitude, lng: l.location.longitude }),

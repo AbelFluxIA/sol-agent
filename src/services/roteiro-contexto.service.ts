@@ -26,7 +26,7 @@ export interface ContextoRoteiro {
   partida: string | null          // "perto de Manaíra, João Pessoa" (da posição do celular)
   gostos: string[]
   lugaresDesejados: string[]
-  jaFeitos: string[]              // lugares de roteiros anteriores no mesmo destino
+  jaFeitos: string[]              // lugares do roteiro de viagens que já aconteceram no mesmo destino
   gostou: string[]
   naoGostou: string[]
   eventos: Evento[]
@@ -80,9 +80,13 @@ export async function montarContexto(phone: string, destino: string, chegada: st
     if (!conv) return
     const antigos = await prisma.itinerary.findMany({
       where: { conversationId: conv.id, rawItinerary: { not: null }, ...(itineraryId ? { id: { not: itineraryId } } : {}) },
-      orderBy: { createdAt: 'desc' }, take: 6, select: { destination: true, rawItinerary: true },
+      orderBy: { createdAt: 'desc' }, take: 6, select: { destination: true, rawItinerary: true, departureDate: true, arrivalDate: true },
     })
-    const nomes = antigos.filter(a => mesmaCidade(a.destination, destino)).flatMap(a => nomesDasParadas(a.rawItinerary ?? ''))
+    // Só conta como "já esteve no roteiro" a viagem que JÁ ACONTECEU (terminou antes de hoje). Roteiro gerado
+    // para testar ou para uma data futura não quer dizer que a pessoa foi aos lugares. (Em 25/11 um roteiro de
+    // Foz saiu sem as Cataratas porque elas estavam num roteiro anterior que nunca foi feito.)
+    const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+    const nomes = antigos.filter(a => mesmaCidade(a.destination, destino) && !!(a.departureDate || a.arrivalDate) && (a.departureDate || a.arrivalDate)! < hoje).flatMap(a => nomesDasParadas(a.rawItinerary ?? ''))
     ctx.jaFeitos = [...new Set(nomes)].slice(0, 30)
   })().catch(() => { /* sem histórico */ }))
   tarefas.push(prisma.$queryRaw<{ atividade: string; nota: number }[]>`

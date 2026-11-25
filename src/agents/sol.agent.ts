@@ -29,9 +29,10 @@ import {
   shareCodeDoRoteiro,
 } from '../services/database.service'
 import prisma from '../services/database.service'
+import { cidadeDaPosicao } from '../services/sugestoes.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { guardarExtras, lerExtras, montarContexto, type Transporte } from '../services/roteiro-contexto.service'
-import { conferirRoteiro, reforcarNegocios, cabeNoHorarioEscrito } from '../services/verificacao.service'
+import { conferirRoteiro, reforcarNegocios, cabeNoHorarioEscrito, garantirImperdiveis } from '../services/verificacao.service'
 import { avisosParaConversa } from '../services/avisos.service'
 import { formatoDeConversa } from '../services/formato'
 import { tirarEnchimento, ajustarHorarios, fecharTempos, garantirIdaParaEmbarque, cortarDepoisDaVolta, minutos as minutosDaHora, lerParadas as lerParadasDoTexto } from '../services/roteiro-texto'
@@ -325,11 +326,29 @@ function isInjectionAttempt(msg: string): boolean {
 
 // Ponto de entrada principal — chamado pelo WhatsApp ou pelo app PWA
 // channel='app': retorna o texto da resposta em vez de enviar via WhatsApp
+// Onde a pessoa está: última posição do celular (mandada pelo app junto com a mensagem, ou pelo alfinete
+// de localização no WhatsApp). Em memória, vale 3 horas. Serve para a Guia responder sobre a cidade em que
+// a pessoa ESTÁ, e não sobre a do último roteiro (relato de 22/11: em Blumenau, a Guia indicou Pomerode).
+const posicoesRecentes = new Map<string, { lat: number; lng: number; cidade: string | null; em: number }>()
+async function lembrarPosicao(phone: string, lat: number, lng: number): Promise<void> {
+  const antes = posicoesRecentes.get(phone)
+  // Mesma região (menos de ~1 km) e cidade já conhecida: só renova a hora
+  if (antes?.cidade && Math.abs(antes.lat - lat) < 0.01 && Math.abs(antes.lng - lng) < 0.01) { posicoesRecentes.set(phone, { ...antes, lat, lng, em: Date.now() }); return }
+  const cidade = await Promise.race([cidadeDaPosicao(lat, lng).catch(() => null), new Promise<null>(ok => setTimeout(() => ok(null), 4000))])
+  posicoesRecentes.set(phone, { lat, lng, cidade, em: Date.now() })
+  if (posicoesRecentes.size > 5000) posicoesRecentes.delete(posicoesRecentes.keys().next().value as string)
+}
+const cidadeBase = (s: string | null | undefined) => (s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().split(/\s*[-,]\s*/)[0].trim()
+
 export async function processMessage(
   phone: string,
   userMessage: string,
-  channel: Canal = 'whatsapp'
+  channel: Canal = 'whatsapp',
+  extras: { posicao?: { lat: number; lng: number } } = {},
 ): Promise<string | void> {
+  const alfinete = userMessage.match(/\[LOCALIZAÇÃO:\s*lat=(-?\d+(?:\.\d+)?),\s*lng=(-?\d+(?:\.\d+)?)\]/)
+  const posicaoDaMensagem = extras.posicao ?? (alfinete ? { lat: Number(alfinete[1]), lng: Number(alfinete[2]) } : null)
+  if (posicaoDaMensagem) await lembrarPosicao(phone, posicaoDaMensagem.lat, posicaoDaMensagem.lng).catch(() => { /* segue sem a posição */ })
   log.info('mensagem recebida', { phone, data: { preview: userMessage.substring(0, 80), channel } })
   marcarCanal(phone, channel)
 
@@ -379,14 +398,26 @@ export async function processMessage(
   let guiaContext = ''
   if (conversation.hasCompanion) {
     const itinerary = await getLatestItinerary(phone)
-    const itinerarySection = itinerary?.rawItinerary
-      ? `\n\n[ROTEIRO DO CLIENTE — DIA ATUAL:\n${extractCurrentDaySection(itinerary.rawItinerary, conversation.arrivalDate)}]`
+    // A Guia de 30 dias vale fora da viagem: o roteiro só é "o dia de hoje" se hoje está dentro das datas dele
+    const hojeBR = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+    const emViagem = !!conversation.arrivalDate && !!conversation.departureDate && conversation.arrivalDate <= hojeBR && hojeBR <= conversation.departureDate
+    const pos = posicoesRecentes.get(phone)
+    const posValida = pos && Date.now() - pos.em < 3 * 3600_000 ? pos : null
+    const outraCidade = !!posValida?.cidade && !!conversation.destination && cidadeBase(posValida.cidade) !== cidadeBase(conversation.destination)
+    const ondeSection = posValida
+      ? `\n\n[ONDE O CLIENTE ESTÁ AGORA (posição do celular, há ${Math.max(0, Math.round((Date.now() - posValida.em) / 60000))} min): ${posValida.cidade ?? 'cidade não identificada'} (lat ${posValida.lat.toFixed(4)}, lng ${posValida.lng.toFixed(4)}).${outraCidade ? ` ATENÇÃO: ele NÃO está em ${conversation.destination}, a cidade do roteiro. Tudo o que for "perto", "aqui", "agora", "próximo", "outros lugares" ou "onde comer" é sobre ${posValida.cidade}. Diga o nome dessa cidade na resposta e NÃO indique lugares de ${conversation.destination}, a menos que ele peça.` : ''}]`
+      : ''
+    const foraSection = !emViagem
+      ? `\n\n[HOJE NÃO É DIA DO ROTEIRO: a viagem a ${conversation.destination ?? 'esse destino'} é de ${conversation.arrivalDate ?? '?'} a ${conversation.departureDate ?? '?'} e hoje é ${hojeBR}. NÃO fale como se ele estivesse em ${conversation.destination ?? 'lá'} hoje.${posValida ? '' : ' Você não sabe onde ele está: se ele pedir lugares "perto", "aqui" ou "agora", PERGUNTE em que cidade ou bairro está (ou peça para mandar a localização) antes de indicar qualquer lugar.'}]`
+      : ''
+    const itinerarySection = itinerary?.rawItinerary && !(outraCidade && !emViagem)
+      ? `\n\n[ROTEIRO DO CLIENTE — ${emViagem ? 'DIA ATUAL' : 'ROTEIRO MAIS RECENTE (não é de hoje)'}:\n${extractCurrentDaySection(itinerary.rawItinerary, conversation.arrivalDate)}]`
       : ''
     const visitedSection = itinerary?.visitedNotes
       ? `\n\n[JÁ VISITADO/FEITO — não sugira de novo como próximo passo, a menos que o cliente peça para revisar:\n${itinerary.visitedNotes}]`
       : ''
     const { label: periodLabel, hour } = currentPeriodInfo()
-    guiaContext = `\n\n[MODO GUIA ATIVO — hasCompanion: true. Período atual do dia: ${periodLabel} (${hour}h). NUNCA sugira proativamente algo de um período que já passou hoje — só fale sobre isso se o cliente perguntar. Oriente em tempo real com base no roteiro abaixo.]${itinerarySection}${visitedSection}`
+    guiaContext = `\n\n[MODO GUIA ATIVO — hasCompanion: true. Período atual do dia: ${periodLabel} (${hour}h). NUNCA sugira proativamente algo de um período que já passou hoje — só fale sobre isso se o cliente perguntar. Oriente em tempo real com base no roteiro abaixo.]${ondeSection}${foraSection}${itinerarySection}${visitedSection}`
 
     trackVisitedPlaces(phone, userMessage).catch(err =>
       log.warn('falha ao rastrear local visitado', { phone, data: { error: (err as Error).message } })
@@ -981,9 +1012,16 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     const acertado = { texto: comEmbarque.texto, ajustes: comAbertura.ajustes }
     if (semEnchimento.tiradas.length || acertado.ajustes.length || comEmbarque.incluida) log.info('roteiro ajustado depois de gerar', { phone, step: 'verificacao', data: { tiradas: semEnchimento.tiradas, horarios: acertado.ajustes, idaParaEmbarque: comEmbarque.incluida } })
     // Viagem de negócios: garante que o horário comercial tem lugares de negócios de verdade
-    const textoBase = /turista de neg[oó]cios/i.test(touristProfile || '') ? await log.timed(phone, 'reforco-negocios', () => reforcarNegocios(acertado.texto, dest, datasDaViagem, phone, latestIt?.id)) : acertado.texto
+    const ehNegocios = /turista de neg[oó]cios/i.test(touristProfile || '')
+    const textoBase = ehNegocios ? await log.timed(phone, 'reforco-negocios', () => reforcarNegocios(acertado.texto, dest, datasDaViagem, phone, latestIt?.id)) : acertado.texto
+    // Cartão-postal do destino que ficou de fora entra antes da conferência (que valida horário e lugar).
+    // Viagem de negócios não passa por aqui: o dia é de trabalho.
+    const perfilDaPessoa = `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`
+    const postais = ehNegocios ? { texto: textoBase, lista: [] as string[], incluido: null as string | null }
+      : await garantirImperdiveis(textoBase, { destino: dest, datas: datasDaViagem, perfil: perfilDaPessoa, evitar: [...(contexto?.naoGostou ?? []), ...(latestIt?.visitedNotes ? latestIt.visitedNotes.split('\n') : [])], phone, itineraryId: latestIt?.id })
+          .catch(() => ({ texto: textoBase, lista: [] as string[], incluido: null as string | null }))
     const conferido = await log.timed(phone, 'conferencia-google', () =>
-      conferirRoteiro(textoBase, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem, chegadaMin })
+      conferirRoteiro(postais.texto, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem, chegadaMin })
     )
     // Por último (os trajetos já são os reais): o tempo no local não pode atropelar a próxima parada
     const tempos = fecharTempos(conferido.texto, cabeNoHorarioEscrito)
@@ -998,6 +1036,22 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     // Salva texto no banco para a Sol Guia usar como contexto
     if (latestIt) {
       await updateItinerary(latestIt.id, { rawItinerary: itineraryText, status: 'generated' })
+      // Guarda o que foi usado para montar ESTE roteiro (pedido de 22/11): o que a pessoa escolheu e o que a
+      // conferência fez. Serve para a equipe entender por que um roteiro saiu de um jeito.
+      const configuracao = {
+        geradoEm: new Date().toISOString(), canal: channel, destino: dest, chegada: arrivalDate, saida: departureDate,
+        horaChegada: arrivalTime ?? null, horaSaida: departureTime ?? null, origem: originCity ?? null, transporte: transportMode ?? null,
+        grupo: groupType ?? null, perfil: touristProfile ?? null, hospedagem: hospedagem ?? null,
+        orcamento: touristProfile?.match(/or[cç]amento\s+([^|,]+)/i)?.[1]?.trim() ?? null,
+        interesses: touristProfile?.match(/interesses[^:]*:\s*([^|]+?)(?:,\s*or[cç]amento|\s*\||$)/i)?.[1]?.split(/\s*,\s*/).filter(Boolean) ?? [],
+        gostosDoCadastro: contexto?.gostos ?? [], roteirosAnterioresNoDestino: contexto?.jaFeitos?.length ?? 0, eventosNasDatas: contexto?.eventos?.length ?? 0,
+        partiuDeOndeEstava: !!contexto?.partida, modelo: config.google.model,
+        cartoesPostais: postais.lista, cartaoPostalIncluido: postais.incluido,
+        conferencia: { paradas: conferido.paradas, ok: conferido.ok, trocadas: conferido.trocadas, reprovadas: conferido.reprovadas ?? [] },
+        ajustes: { tiradas: semEnchimento.tiradas, horarios: acertado.ajustes, tempos: tempos.ajustes },
+      }
+      await prisma.$executeRaw`update public."Itinerary" set configuracao = ${JSON.stringify(configuracao)}::jsonb where id = ${latestIt.id}`
+        .catch(err => log.warn('não gravou as configurações do roteiro', { phone, step: 'verificacao', data: { error: (err as Error).message } }))
       // Veio por convite e a viagem é futura: conta como indicação convertida (RA-IND-03)
       registrarConversao(phone, arrivalDate).catch(err => log.error('erro ao registrar conversão', err, { phone, step: 'indicacao' }))
     }
