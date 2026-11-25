@@ -92,6 +92,31 @@ async function lerLugarRecente(consulta: string, centro: Ponto | null): Promise<
 }
 const chaveDoLugar = (nome: string) => nome.replace(/\*/g, '').replace(/^(almo[cç]o|jantar|caf[eé]( da manh[aã])?|lanche)\s+(n[oa]s?|em)\s+/i, '').replace(/\s*\(.*?\)\s*/g, ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 
+// A linha 🕒 do próprio roteiro diz os dias em que abre ("Terça a domingo", "terça a sexta / domingos")?
+// Se diz e o dia da parada não está entre eles, a parada está fechada (relato: Museu Aleijadinho numa segunda,
+// com "Horário: Terça a domingo" e o selo de conferido).
+const DIAS_SEMANA: [RegExp, number][] = [[/domingos?/, 0], [/segundas?(-feiras?)?/, 1], [/ter[cç]as?(-feiras?)?/, 2], [/quartas?(-feiras?)?/, 3], [/quintas?(-feiras?)?/, 4], [/sextas?(-feiras?)?/, 5], [/s[aá]bados?/, 6]]
+export function fechadoNoDiaEscrito(bloco: string[], diaSemana: number): boolean {
+  const linha = (bloco.find(l => l.includes('🕒')) ?? '').toLowerCase()
+  if (!linha || /todos os dias|diariamente|24 ?h/.test(linha)) return false
+  const nome = '(domingos?|segundas?(?:-feiras?)?|ter[cç]as?(?:-feiras?)?|quartas?(?:-feiras?)?|quintas?(?:-feiras?)?|sextas?(?:-feiras?)?|s[aá]bados?)'
+  const num = (t: string) => DIAS_SEMANA.find(([re]) => new RegExp(`^${re.source}$`).test(t))?.[1] ?? -1
+  const abertos = new Set<number>()
+  let resto = linha
+  for (const m of linha.matchAll(new RegExp(`${nome}\\s+(?:a|à|até|ao)\\s+${nome}`, 'g'))) {
+    const de = num(m[1]), ate = num(m[2])
+    if (de < 0 || ate < 0) continue
+    for (let d = de; ; d = (d + 1) % 7) { abertos.add(d); if (d === ate) break }
+    resto = resto.replace(m[0], ' ')
+  }
+  // "fechado às segundas": dia citado como fechado não conta como aberto
+  const fechados = new Set<number>()
+  for (const m of resto.matchAll(new RegExp(`fechad[oa]s?\\s+(?:[àa]s?|aos?|nas?|nos?)?\\s*${nome}`, 'g'))) { const d = num(m[1]); if (d >= 0) fechados.add(d) }
+  if (fechados.has(diaSemana)) return true
+  for (const m of resto.matchAll(new RegExp(nome, 'g'))) { const d = num(m[1]); if (d >= 0 && !fechados.has(d)) abertos.add(d) }
+  return abertos.size > 0 && !abertos.has(diaSemana)
+}
+
 // Orçamento econômico: a refeição não pode ser em lugar caro. Vale o nível de preço do Google, o próprio
 // custo escrito no roteiro (acima de R$ 60 por pessoa) e nomes que já dizem o preço (rodízio, steakhouse...).
 const EH_COMIDA = /restaurante|almo[cç]o|jantar|churrasc|bistr|pizzar|cantina|lanchonete|padaria|buffet|cozinha|gastr|hamburg|sushi|japon|parrilla|steak|rod[ií]zio|caf[eé]\b|bar\b|boteco|peixaria|marisc/i
@@ -103,7 +128,7 @@ function custoMaximo(bloco: string[]): number | null {
   return valores.length ? Math.max(...valores) : null
 }
 export function caroParaEconomico(nome: string, bloco: string[], preco?: string): boolean {
-  if (!EH_COMIDA.test(nome) && !bloco.some(l => l.includes('💬') && /almo[cç]o|jantar|refei[cç][aã]o/i.test(l))) return false
+  if (!EH_COMIDA.test(nome) && !bloco.some(l => l.includes('💬') && /almo[cç]o|jantar|refei[cç][aã]o|gastron|culin[aá]ri|card[aá]pio|prato|menu\b|petisc|comida/i.test(l))) return false
   if (preco === 'PRICE_LEVEL_EXPENSIVE' || preco === 'PRICE_LEVEL_VERY_EXPENSIVE') return true
   if (NOME_CARO.test(nome)) return true
   const max = custoMaximo(bloco)
@@ -123,7 +148,7 @@ async function conferir(texto: string, destino: string, datas: string[], centro:
         const consulta = p.consulta && p.consulta.length > 3 ? p.consulta : `${p.nome}, ${destino}`
         const l = await lerLugarRecente(consulta, centro)
         if (l === undefined) { saida.push({ parada: p, estado: 'sem-dados', ponto: null }); return }
-        if (!l) { saida.push({ parada: p, estado: 'nao-encontrado', ponto: null }); return }
+        if (!l) { saida.push({ parada: p, estado: economico && caroParaEconomico(p.nome, linhas.slice(p.inicio, p.fim)) ? 'caro' : 'nao-encontrado', ponto: null }); return }
         // Longe demais do destino (mais de 80 km): o Google achou outro lugar com nome parecido
         if (centro && l.ponto && distanciaKm(centro, l.ponto) > 80) { saida.push({ parada: p, estado: 'nao-encontrado', ponto: null }); return }
         let estado: Estado = 'ok'
@@ -138,6 +163,8 @@ async function conferir(texto: string, destino: string, datas: string[], centro:
         }
         // Mesmo aberto no Google: o horário escrito no próprio roteiro precisa comportar a visita
         if ((estado === 'ok' || estado === 'sem-dados') && !cabeNoHorarioEscrito(linhas.slice(p.inicio, p.fim), p.hora)) estado = 'fechado-no-horario'
+        const dataDaParada = datas[Math.min(p.dia, datas.length - 1)]
+        if ((estado === 'ok' || estado === 'sem-dados') && dataDaParada && fechadoNoDiaEscrito(linhas.slice(p.inicio, p.fim), new Date(`${dataDaParada}T12:00:00Z`).getUTCDay())) estado = 'fechado-no-horario'
         if (economico && (estado === 'ok' || estado === 'sem-dados') && caroParaEconomico(p.nome, linhas.slice(p.inicio, p.fim), l.preco)) estado = 'caro'
         saida.push({ parada: p, estado, ponto: l.ponto })
       } catch (err) {
@@ -236,7 +263,7 @@ Sem comentários antes ou depois.`
 // A atração que quase todo visitante faz (Cataratas em Foz, Cristo no Rio) tem de estar no roteiro.
 // A lista vem de uma pergunta curta à IA, guardada 24 h por destino. Se a principal ficou de fora,
 // ela entra no lugar de uma parada de passeio comum, e a conferência seguinte valida horário e existência.
-export interface Imperdivel { nome: string; chaves: string[] }
+export interface Imperdivel { nome: string; chaves: string[]; consenso?: boolean }
 const semAcento = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
 const cacheImperdiveis = new Map<string, { em: number; lista: Imperdivel[] }>()
 export async function imperdiveisDe(destino: string, phone?: string, itineraryId?: string): Promise<Imperdivel[]> {
@@ -245,11 +272,11 @@ export async function imperdiveisDe(destino: string, phone?: string, itineraryId
   if (hit && Date.now() - hit.em < 24 * 3600_000) return hit.lista
   const resposta = await perguntarAoGemini(`Liste as atrações turísticas IMPERDÍVEIS de ${destino}: só as que praticamente todo visitante de primeira viagem faz (os cartões-postais do lugar), no máximo 3, da mais importante para a menos. Não inclua restaurante, hotel, bairro inteiro nem evento que só acontece numa época do ano. Se o destino não tiver atração desse porte, responda [].
 Responda SOMENTE com JSON, sem texto antes ou depois:
-[{"nome":"nome mais conhecido da atração","chaves":["1 ou 2 expressões curtas, em minúsculas e sem acento, que aparecem no nome da atração num roteiro (ex.: \"cataratas\", \"cristo redentor\")"]}]`, { callType: 'imperdiveis', phone, itineraryId, busca: false, maxTokens: 500, temperatura: 0.1, timeoutMs: 25_000 })
+[{"nome":"nome mais conhecido da atração","consenso":true ou false (true SÓ se é a atração que define o destino, sem discussão, como as Cataratas em Foz do Iguaçu ou o Cristo Redentor no Rio; na dúvida, false),"chaves":["1 ou 2 expressões curtas, em minúsculas e sem acento, que aparecem no nome da atração num roteiro (ex.: \"cataratas\", \"cristo redentor\")"]}]`, { callType: 'imperdiveis', phone, itineraryId, busca: false, maxTokens: 500, temperatura: 0.1, timeoutMs: 25_000 })
   let lista: Imperdivel[] = []
   try {
     const json = JSON.parse((resposta.match(/\[[\s\S]*\]/) ?? ['[]'])[0])
-    if (Array.isArray(json)) lista = json.filter(x => x && typeof x.nome === 'string' && Array.isArray(x.chaves)).map(x => ({ nome: String(x.nome).slice(0, 80), chaves: x.chaves.filter((c: unknown) => typeof c === 'string').map((c: string) => semAcento(c).trim()).filter((c: string) => c.length >= 4).slice(0, 3) })).filter(x => x.chaves.length).slice(0, 3)
+    if (Array.isArray(json)) lista = json.filter(x => x && typeof x.nome === 'string' && Array.isArray(x.chaves)).map(x => ({ nome: String(x.nome).slice(0, 80), consenso: x.consenso === true, chaves: x.chaves.filter((c: unknown) => typeof c === 'string').map((c: string) => semAcento(c).trim()).filter((c: string) => c.length >= 4).slice(0, 3) })).filter(x => x.chaves.length).slice(0, 3)
   } catch { lista = [] }
   cacheImperdiveis.set(chave, { em: Date.now(), lista })
   if (cacheImperdiveis.size > 500) cacheImperdiveis.delete(cacheImperdiveis.keys().next().value as string)
@@ -265,10 +292,19 @@ export async function garantirImperdiveis(texto: string, o: { destino: string; d
   const passeios = paradas.filter(p => !ehLogistica(p.nome))
   const bate = (i: Imperdivel, nome: string) => i.chaves.some(c => semAcento(nome).includes(c))
   if (passeios.some(p => bate(principal, p.nome))) return nada
+  // Só força o que é consenso (a lista da IA é discutível em muitos destinos: "Rua Torta", "Obelisco")
+  if (!principal.consenso) return nada
   // A pessoa disse que já foi ou que não gostou: não insiste
   if ((o.evitar ?? []).some(e => bate(principal, e))) return nada
   // Sai uma parada de passeio comum (não refeição, não outro cartão-postal), de preferência de manhã
-  const candidatas = passeios.filter(p => { const m = minutos(p.hora); return m !== null && m >= 8 * 60 && m <= 15 * 60 && !EH_COMIDA.test(p.nome) && !lista.some(i => bate(i, p.nome)) })
+  // Dia com tempestade na previsão escrita no roteiro não recebe atração ao ar livre
+  const linhasDoTexto = texto.split('\n')
+  const diaComTempestade = (dia: number) => {
+    const cabecalhos = linhasDoTexto.map((l, i) => (/^\s*\*{0,2}DIA\s*\d+/i.test(l) ? i : -1)).filter(i => i >= 0)
+    const ini = cabecalhos[dia]; if (ini === undefined) return false
+    return /tempestade|raios|indoor obrigat/i.test(linhasDoTexto.slice(ini, ini + 4).join(' '))
+  }
+  const candidatas = passeios.filter(p => { const m = minutos(p.hora); return m !== null && m >= 8 * 60 && m <= 15 * 60 && !EH_COMIDA.test(p.nome) && !lista.some(i => bate(i, p.nome)) && !diaComTempestade(p.dia) })
   if (passeios.length < 3 || !candidatas.length) return nada
   const alvo = candidatas.find(p => (minutos(p.hora) ?? 0) <= 11 * 60) ?? candidatas[0]
   const motivo = `esta parada dá lugar a "${principal.nome}", a atração mais importante de ${o.destino}, que ficou de FORA do roteiro. Escreva o bloco de "${principal.nome}" (exatamente esse lugar), com o funcionamento real nesse dia, o preço real do ingresso e o tempo que a visita pede. Pode mudar o horário para o melhor momento da visita, entre a parada anterior e a próxima`
@@ -416,27 +452,36 @@ export interface ResultadoConferencia { texto: string; paradas: number; ok: numb
 // que acaba antes da noite sem jantar (menos o último, que tem a volta). Acontece quando a IA planeja
 // pouco ou quando uma parada fechada é retirada. Pede à IA um lugar para cada vazio; quem entra aqui é
 // conferido no Google Maps logo depois, e o que reprovar sai de novo.
-async function preencherVazios(texto: string, o: { destino: string; datas: string[]; perfil: string; phone?: string; itineraryId?: string }, evitar: string[] = []): Promise<{ texto: string; novas: string[] }> {
+async function preencherVazios(texto: string, o: { destino: string; datas: string[]; perfil: string; phone?: string; itineraryId?: string; saidaMin?: number | null; chegadaMin?: number | null }, evitar: string[] = []): Promise<{ texto: string; novas: string[] }> {
   const { linhas, paradas, dias } = lerParadas(texto)
-  interface Vazio { depoisDe: Parada; antesDe: Parada | null; hora: number; ate: number | null; jantar: boolean; almoco?: boolean }
+  interface Vazio { depoisDe: Parada; antesDe: Parada | null; hora: number; ate: number | null; jantar: boolean; almoco?: boolean; antesDaPrimeira?: boolean }
   const vazios: Vazio[] = []
   const quinze = (m: number) => Math.ceil(m / 15) * 15
   const fimDe = (p: Parada) => { const a = minutos(p.hora); return a === null ? null : a + (duracaoMin(linhas.slice(p.inicio, p.fim)) ?? 60) }
   for (let d = 0; d < dias; d++) {
     const doDia = paradas.filter(p => p.dia === d)
     if (!doDia.length) continue
+    // Manhã vazia: a primeira parada do dia começa muito depois de a pessoa estar livre (chegada no 1º dia, 9h nos
+    // outros). Acontece quando as paradas da manhã saíram por estarem fechadas (segunda-feira em cidade de museus).
+    {
+      const primeira = doDia[0], h1 = minutos(primeira.hora)
+      const livreDesde = Math.max(d === 0 ? (o.chegadaMin ?? 9 * 60) : 9 * 60, 8 * 60) + (d === 0 && o.chegadaMin ? 30 : 0)
+      if (h1 !== null && !ehLogistica(primeira.nome) && h1 >= 11 * 60 && h1 - livreDesde >= 150) vazios.push({ depoisDe: primeira, antesDe: primeira, hora: quinze(livreDesde), ate: h1 - 30, jantar: false, antesDaPrimeira: true })
+    }
     for (let i = 0; i < doDia.length - 1; i++) {
       const f = fimDe(doDia[i]), prox = minutos(doDia[i + 1].hora)
-      if (f === null || prox === null || ehLogistica(doDia[i].nome)) continue
+      // Depois da CHEGADA também vale (bate-volta em Ouro Preto: chegou 08:30 e a primeira parada era 13:30);
+      // só o traslado de ida embora não abre espaço
+      if (f === null || prox === null || (ehLogistica(doDia[i].nome) && i > 0)) continue
       const livre = prox - Math.min(trajetoMin(linhas.slice(doDia[i + 1].inicio, doDia[i + 1].fim)), 90) - f
-      if (livre >= 180 && f >= 8 * 60 && f <= 16 * 60 + 30) vazios.push({ depoisDe: doDia[i], antesDe: doDia[i + 1], hora: quinze(f + 20), ate: prox - 30, jantar: false })
+      if (livre >= 120 && f >= 8 * 60 && f <= 16 * 60 + 30) vazios.push({ depoisDe: doDia[i], antesDe: doDia[i + 1], hora: quinze(f + 20), ate: prox - 30, jantar: false })
     }
     // Dia sem almoço (nenhuma parada de comida entre 10h30 e 14h45) com espaço de pelo menos 1 hora na hora do almoço
     const ehComida = (p: Parada) => /restaurante|almo[cç]o|churrasc|bistr|pizzar|cantina|lanchonete|padaria|buffet|comedoria|\bbar\b|boteco|caf[eé]|mercado|gastron|cozinha|grill|burger|hamb[uú]rg|tapioc|peixaria|galeto|food|emp[oó]rio|quiosque|barraca/i.test(p.nome) || /almo[cç]/i.test(linhas.slice(p.inicio, p.fim).join(' '))
     if (!doDia.some(p => { const m = minutos(p.hora) ?? -1; return m >= 10 * 60 + 30 && m <= 14 * 60 + 45 && ehComida(p) })) {
       for (let i = 0; i < doDia.length - 1; i++) {
         const fa = fimDe(doDia[i]), prox = minutos(doDia[i + 1].hora)
-        if (fa === null || prox === null || ehLogistica(doDia[i].nome) || fa < 10 * 60 + 45 || fa > 13 * 60 + 45) continue
+        if (fa === null || prox === null || (ehLogistica(doDia[i].nome) && i > 0) || fa < 10 * 60 + 45 || fa > 13 * 60 + 45) continue
         if (prox - Math.min(trajetoMin(linhas.slice(doDia[i + 1].inicio, doDia[i + 1].fim)), 90) - fa < 60) continue
         // o almoço entra no lugar de um eventual encaixe de passeio no mesmo intervalo
         for (let k = vazios.length - 1; k >= 0; k--) if (vazios[k].depoisDe === doDia[i]) vazios.splice(k, 1)
@@ -445,9 +490,15 @@ async function preencherVazios(texto: string, o: { destino: string; datas: strin
       }
     }
     const ultima = doDia[doDia.length - 1], f = fimDe(ultima)
-    if (d < dias - 1 && f !== null && f <= 18 * 60 + 30 && !ehLogistica(ultima.nome) && !doDia.some(p => (minutos(p.hora) ?? 0) >= 18 * 60)) {
-      if (f <= 15 * 60 + 30) vazios.push({ depoisDe: ultima, antesDe: null, hora: quinze(f + 20), ate: 18 * 60 + 30, jantar: false })
-      vazios.push({ depoisDe: ultima, antesDe: null, hora: 19 * 60 + 30, ate: null, jantar: true })
+    // Fim do dia. No último dia (ou bate-volta) vale até 1 hora antes da volta; jantar só se a volta é depois das 21h.
+    // Já ter um passeio à noite não dispensa o jantar: só dispensa se a parada da noite é de comida.
+    const ultimoDia = d === dias - 1
+    const limite = ultimoDia ? (o.saidaMin ?? null) : 24 * 60
+    const temJantar = doDia.some(p => (minutos(p.hora) ?? 0) >= 18 * 60 && ehComida(p))
+    if (f !== null && f <= 18 * 60 + 30 && !ehLogistica(ultima.nome) && limite !== null) {
+      const ateTarde = Math.min(18 * 60 + 30, limite - 60)
+      if (f <= 15 * 60 + 30 && ateTarde - f >= 120 && !doDia.some(p => (minutos(p.hora) ?? 0) >= 18 * 60)) vazios.push({ depoisDe: ultima, antesDe: null, hora: quinze(f + 20), ate: ateTarde, jantar: false })
+      if (!temJantar && limite >= 21 * 60) vazios.push({ depoisDe: ultima, antesDe: null, hora: Math.max(19 * 60 + 30, quinze(f + 20)), ate: null, jantar: true })
     }
   }
   if (!vazios.length) return { texto, novas: [] }
@@ -457,7 +508,7 @@ async function preencherVazios(texto: string, o: { destino: string; datas: strin
   const lista = pedir.map((v, i) => {
     const data = o.datas[Math.min(v.depoisDe.dia, o.datas.length - 1)] ?? ''
     const semana = data ? SEMANA[new Date(`${data}T12:00:00Z`).getUTCDay()] : ''
-    const onde = `depois de "${v.depoisDe.nome.replace(/\*/g, '')}"${v.antesDe ? ` e antes de "${v.antesDe.nome.replace(/\*/g, '')}" (${v.antesDe.hora})` : ''}`
+    const onde = v.antesDaPrimeira ? `ANTES de "${v.depoisDe.nome.replace(/\*/g, '')}" (${v.depoisDe.hora}), que hoje é a primeira parada do dia: a manhã está vazia` : `depois de "${v.depoisDe.nome.replace(/\*/g, '')}"${v.antesDe ? ` e antes de "${v.antesDe.nome.replace(/\*/g, '')}" (${v.antesDe.hora})` : ''}`
     return v.jantar || v.almoco
       ? `${i + 1}. Dia ${v.depoisDe.dia + 1} (${data}, ${semana}), às ${hh(v.hora)}, ${onde}: um RESTAURANTE para o ${v.almoco ? 'almoço (cerca de 1 hora)' : 'jantar'}`
       : `${i + 1}. Dia ${v.depoisDe.dia + 1} (${data}, ${semana}), começando às ${hh(v.hora)} e terminando até ${hh(v.ate ?? v.hora + 120)}, ${onde}: uma ATRAÇÃO ou passeio (não é refeição)`
@@ -467,7 +518,7 @@ O roteiro abaixo ficou com HORÁRIOS VAZIOS. Para CADA item da lista, escolha UM
 ${lista}
 
 Regras: o lugar fica PERTO de onde a pessoa está nesse momento (a parada anterior) ou no caminho para a próxima; está ABERTO nesse dia da semana e horário (confirme no Google Search); é bem avaliado; combina com o perfil e com a previsão do tempo desse dia (está escrita no roteiro); e NÃO está no roteiro. Use o NOME OFICIAL do lugar no Google Maps. "Tempo livre", descanso, hotel, check-in e compras NÃO servem.
-ATENÇÃO ao fim da tarde: muitos museus, parques, grutas e centros culturais fecham às 17h ou param de receber visitantes às 16h. Para horário depois das 15h30, prefira o que funciona até a noite: orla, pôr do sol, mirante de acesso livre, praça ou rua famosa, feira, mercado, café, sorveteria, cervejaria, shopping ou atração que feche depois das 18h. O lugar precisa continuar aberto até o fim do intervalo pedido.${evitar.length ? `\nNÃO use estes lugares (já foram conferidos e estão fechados nesse horário): ${evitar.join('; ')}.` : ''}
+ATENÇÃO ao fim da tarde: muitos museus, parques, grutas e centros culturais fecham às 17h ou param de receber visitantes às 16h. Para horário depois das 15h30, prefira o que funciona até a noite: orla, pôr do sol, mirante de acesso livre, praça ou rua famosa, feira, mercado, café, sorveteria, cervejaria ou atração que feche depois das 18h. Shopping center NÃO serve como passeio (só se a pessoa pediu compras). O lugar precisa continuar aberto até o fim do intervalo pedido.${evitar.length ? `\nNÃO use estes lugares (já foram conferidos e estão fechados nesse horário): ${evitar.join('; ')}.` : ''}
 
 ROTEIRO:
 ${texto.slice(0, 12000)}
@@ -499,7 +550,8 @@ Sem comentários antes ou depois.`
     const b = acertarCabecalho((blocos.get(numero) ?? []).join('\n').trim().split('\n'), { periodo: '', hora: hh(v.hora) })
     const lidas = lerParadas(`DIA 1\n${b.join('\n')}`).paradas
     if (b.length < 2 || lidas.length !== 1 || ehLogistica(lidas[0].nome) || ehGenerico(lidas[0].nome)) continue
-    novo.splice(v.depoisDe.fim, 0, '', ...b)
+    if (v.antesDaPrimeira) novo.splice(v.depoisDe.inicio, 0, ...b, '')
+    else novo.splice(v.depoisDe.fim, 0, '', ...b)
     novas.push(lidas[0].nome)
   }
   log.info('horários vazios preenchidos', { phone: o.phone, step: 'verificacao', data: { vazios: pedir.map(v => `dia ${v.depoisDe.dia + 1} ${hh(v.hora)}${v.jantar ? ' (jantar)' : v.almoco ? ' (almoço)' : ''}`), entraram: novas.map(x => x.replace(/\*/g, '')) } })
@@ -510,7 +562,7 @@ Sem comentários antes ou depois.`
 // Nunca derruba a geração: se o Google falhar, devolve o texto como veio.
 // soDia: confere só as paradas de um dia (usado depois de trocar uma atividade).
 // partida: posição do celular na hora do pedido; hospedagem: nome do hotel ou bairro (achado no mapa aqui).
-export async function conferirRoteiro(texto: string, o: { destino: string; datas: string[]; centro: Ponto | null; perfil: string; phone?: string; itineraryId?: string; soDia?: number; partida?: Ponto | null; hospedagem?: string | null; chegadaMin?: number | null }): Promise<ResultadoConferencia> {
+export async function conferirRoteiro(texto: string, o: { destino: string; datas: string[]; centro: Ponto | null; perfil: string; phone?: string; itineraryId?: string; soDia?: number; partida?: Ponto | null; hospedagem?: string | null; chegadaMin?: number | null; saidaMin?: number | null }): Promise<ResultadoConferencia> {
   const vazio = { texto, paradas: 0, ok: 0, trocadas: 0, semConferir: 0, consultas: 0 }
   // No modo de teste de carga o Google é simulado: não há o que conferir
   if (!fotosLigadas() || process.env.ROTEIRO_SEM_CONFERENCIA === 'true' || process.env.MODO_CARGA === '1') return vazio
@@ -552,7 +604,7 @@ export async function conferirRoteiro(texto: string, o: { destino: string; datas
         }
         atual = ls.join('\n')
         log.info('paradas fechadas tiradas do roteiro', { phone: o.phone, step: 'verificacao', data: { tiradas: tirar.map(c => `${c.parada.nome.replace(/\*/g, '')} (${c.parada.hora})`) } })
-        conf = await conferir(atual, o.destino, o.datas, o.centro, o.soDia)
+        conf = await conferir(atual, o.destino, o.datas, o.centro, o.soDia, economico)
       }
     }
     // Horários vazios (só no roteiro inteiro; depois de trocar uma atividade não mexe no resto do dia).
@@ -564,7 +616,7 @@ export async function conferirRoteiro(texto: string, o: { destino: string; datas
           const cheio = await preencherVazios(atual, o, evitar)
           if (!cheio.novas.length) break
           let textoCheio = ajustarHorarios(cheio.texto, o.chegadaMin ?? null).texto
-          let confCheio = await conferir(textoCheio, o.destino, o.datas, o.centro)
+          let confCheio = await conferir(textoCheio, o.destino, o.datas, o.centro, undefined, economico)
           const reprovadas = confCheio.filter(c => cheio.novas.includes(c.parada.nome) && c.estado !== 'ok' && c.estado !== 'sem-dados')
           if (reprovadas.length) {
             const ls = lerParadas(textoCheio).linhas
@@ -575,7 +627,7 @@ export async function conferirRoteiro(texto: string, o: { destino: string; datas
             textoCheio = ls.join('\n')
             evitar.push(...reprovadas.map(c => c.parada.nome.replace(/\*/g, '')))
             log.info('paradas de encaixe reprovadas e retiradas', { phone: o.phone, step: 'verificacao', data: { tentativa, retiradas: reprovadas.map(c => `${c.parada.nome.replace(/\*/g, '')}: ${c.estado}`) } })
-            confCheio = await conferir(textoCheio, o.destino, o.datas, o.centro)
+            confCheio = await conferir(textoCheio, o.destino, o.datas, o.centro, undefined, economico)
           }
           atual = textoCheio
           conf = confCheio

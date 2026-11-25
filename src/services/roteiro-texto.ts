@@ -62,7 +62,7 @@ export function minutos(hora: string): number | null {
 
 // Tira do roteiro as paradas que não são programa (check-in, check-out, tempo livre, compras de
 // lembrancinhas, descanso). A instrução já proíbe, mas a IA às vezes insiste: aqui sai de vez.
-const ENCHIMENTO = /check-?\s?in|check-?\s?out|tempo livre|lembrancinh|descanso (no|na) (hotel|pousada|hospedagem)|momento de descanso|(retorno|volta) (para|pra|a) casa|fim d[oa] (roteiro|passeio|viagem|dia)|encerramento d[oa] (roteiro|viagem|dia)/i
+const ENCHIMENTO = /check-?\s?in|check-?\s?out|tempo livre|lembrancinh|[uú]ltimas compras|compras de (artesanato|lembran[cç]as?|souvenirs?)|(retorno|volta) (ao|[àa]|para o|para a|pro|pra) (hotel|hostel|pousada|hospedagem)|descanso (no|na) (hotel|pousada|hospedagem)|momento de descanso|(retorno|volta) (para|pra|a) casa|fim d[oa] (roteiro|passeio|viagem|dia)|encerramento d[oa] (roteiro|viagem|dia)/i
 // Programa escrito junto com o check-in ("Check-in e almoço em Copacabana", "Check-in na pousada e caminhada pelo Pelourinho")
 const REFEICAO_JUNTO = /^(.*?(?:check-?\s?in|check-?\s?out)[^*]*?\s+e\s+)((?:almo[cç]o|jantar|caf[eé] da manh[aã]|lanche|caminhada|passeio|visita|tour|trilha|mergulho|banho|p[oô]r do sol|praia)\b.*)$/i
 export function tirarEnchimento(texto: string): { texto: string; tiradas: string[] } {
@@ -224,6 +224,13 @@ export function acertarCabecalho(bloco: string[], alvo: { periodo: string; hora:
 // Parada que não diz QUAL lugar é ("Almoço em restaurante local", "Jantar livre"): não dá para
 // conferir no mapa, e o Google acabava achando um restaurante qualquer e marcando como conferido.
 export function ehGenerico(nome: string): boolean {
+  const cru = limpa(nome)
+  // "Almoço perto do hotel", "Almoço na Pousada ou em restaurante próximo", "Almoço (após o passeio de barco)",
+  // "Explorar os bares do Rio Vermelho", "Passeio de Barco (com parada...)": não dizem QUAL lugar
+  if (/^(almo[cç]o|jantar|caf[eé] da manh[aã]|lanche)\s*(\(|perto\b|pr[oó]xim|ap[oó]s\b|depois\b|n[oa] (hotel|pousada|hostel|hospedagem)\b)/i.test(cru)) return true
+  if (/\bou (em|n[oa]|num|numa) (um |uma |algum |alguma )?(restaurante|bar|lanchonete|caf[eé])/i.test(cru)) return true
+  if (/^(explorar|conhecer|curtir|aproveitar|passear por|caminhada livre|passeio livre)\b/i.test(cru) && !/\b(parque|museu|mercado|praia|centro hist[oó]rico|jardim|feira|mirante)\b/i.test(cru)) return true
+  if (/^passeio de (barco|lancha|escuna|buggy|catamar[aã])\s*(\(|$)/i.test(cru)) return true
   const n = limpa(nome).replace(/^(almo[cç]o|jantar|caf[eé] da manh[aã]|lanche|happy hour)\s*((n[oa]s?|em|num|numa)\s+)?/i, '').trim()
   if (!n || /^(livre|leve|r[aá]pido|por conta pr[oó]pria)$/i.test(n)) return true
   // "Almoço em Copacabana", "Almoço leve em Ponta Negra": diz o bairro, não o restaurante (com restaurante se escreve "no/na")
@@ -326,4 +333,40 @@ export function cortarDepoisDaVolta(texto: string, transporte: string | null | u
     linhas.splice(p.inicio, ate - p.inicio)
   }
   return { texto: linhas.join('\n'), tiradas: fora.map(p => `${p.nome.replace(/\*/g, '')} (${p.hora})`) }
+}
+
+// Depois dos reparos a IA pode devolver a parada com outro horário: o dia tem de ficar em ordem de hora
+// ("14:00 Museu" antes de "13:30 Almoço") e o período do cabeçalho tem de bater com a hora ("Manhã (19:00)").
+// Só mexe no trecho das paradas de cada dia; cabeçalho do dia e previsão ficam onde estão.
+export function ordenarEAcertarPeriodos(texto: string): { texto: string; reordenados: number; periodos: number } {
+  const lido = lerParadas(texto)
+  const linhas = [...lido.linhas]
+  let reordenados = 0, periodos = 0
+  for (let d = lido.dias - 1; d >= 0; d--) {
+    const doDia = lido.paradas.filter(p => p.dia === d).sort((a, b) => a.inicio - b.inicio)
+    if (doDia.length < 2) continue
+    const horas = doDia.map(p => minutos(p.hora))
+    if (horas.some(h => h === null)) continue
+    const ordem = doDia.map((p, i) => ({ p, i, h: horas[i] as number })).sort((a, b) => a.h - b.h || a.i - b.i)
+    if (ordem.every((x, i) => x.i === i)) continue
+    // Cada bloco leva junto as linhas até a próxima parada (inclui a linha em branco de separação)
+    const limites = doDia.map((p, i) => ({ ini: p.inicio, fim: i + 1 < doDia.length ? doDia[i + 1].inicio : p.fim }))
+    const blocos = limites.map(l => linhas.slice(l.ini, l.fim))
+    // o último bloco não tem linha em branco no fim: garante a separação quando ele sobe
+    const ultimo = blocos[blocos.length - 1]
+    const novos = ordem.flatMap((x, k) => { const b = blocos[x.i]; return k < ordem.length - 1 && b === ultimo && b[b.length - 1]?.trim() !== '' ? [...b, ''] : b })
+    while (novos.length && novos[novos.length - 1].trim() === '' && ultimo[ultimo.length - 1]?.trim() !== '') novos.pop()
+    linhas.splice(limites[0].ini, limites[limites.length - 1].fim - limites[0].ini, ...novos)
+    reordenados++
+  }
+  const saida = linhas.map(l => {
+    const m = l.match(/^(\s*)(☀️|🌤️|🌙)\s*\*(Manhã|Tarde|Noite) \((\d{1,2}:\d{2})\):\*(.*)$/)
+    if (!m) return l
+    const min = minutos(m[4]); if (min === null) return l
+    const [emoji, nome] = min < 12 * 60 ? ['☀️', 'Manhã'] : min < 18 * 60 ? ['🌤️', 'Tarde'] : ['🌙', 'Noite']
+    if (nome === m[3]) return l
+    periodos++
+    return `${m[1]}${emoji} *${nome} (${m[4]}):*${m[5]}`
+  })
+  return { texto: saida.join('\n'), reordenados, periodos }
 }

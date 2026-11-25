@@ -29,13 +29,14 @@ import {
   shareCodeDoRoteiro,
 } from '../services/database.service'
 import prisma from '../services/database.service'
+import { estadoDaGuia } from '../services/guia-prazo.service'
 import { cidadeDaPosicao } from '../services/sugestoes.service'
 import { sendWithTyping, sendHuman, sendCtaButton, sendInteractiveButtons, sendImage } from '../services/whatsapp.service'
 import { guardarExtras, lerExtras, montarContexto, type Transporte } from '../services/roteiro-contexto.service'
 import { conferirRoteiro, reforcarNegocios, cabeNoHorarioEscrito, garantirImperdiveis } from '../services/verificacao.service'
 import { avisosParaConversa } from '../services/avisos.service'
 import { formatoDeConversa } from '../services/formato'
-import { tirarEnchimento, ajustarHorarios, fecharTempos, garantirIdaParaEmbarque, cortarDepoisDaVolta, minutos as minutosDaHora, lerParadas as lerParadasDoTexto } from '../services/roteiro-texto'
+import { ordenarEAcertarPeriodos, tirarEnchimento, ajustarHorarios, fecharTempos, garantirIdaParaEmbarque, cortarDepoisDaVolta, minutos as minutosDaHora, lerParadas as lerParadasDoTexto } from '../services/roteiro-texto'
 import { geocodeDestination } from '../services/weather.service'
 import { saveCustomerPhotoBuffer } from '../services/media.service'
 import { addPhotoToMuralWithNarration } from '../services/mural.service'
@@ -190,6 +191,24 @@ function dedupeRepeatedMessage(text: string): string {
   return text
 }
 
+// Roteiro INTEIRO em forma curta para o contexto da Guia: todos os dias, cada parada com hora, nome, horário
+// de funcionamento e custo (saem os textos longos). Antes ia só um pedaço de 2.500 caracteres e a Guia
+// respondia "não tenho o roteiro desse dia" ou inventava o programa de amanhã.
+function resumoDoRoteiro(rawItinerary: string, arrivalDate: string | null): string {
+  const hojeBR = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  const diaDeHoje = arrivalDate ? Math.round((Date.parse(`${hojeBR}T12:00:00Z`) - Date.parse(`${arrivalDate}T12:00:00Z`)) / 86_400_000) + 1 : 0
+  const saida: string[] = []
+  for (const l of rawItinerary.split('\n')) {
+    const t = l.trim()
+    const dia = t.replace(/\*/g, '').match(/^DIA\s*(\d+)(.*)$/i)
+    if (dia) { saida.push(`\nDIA ${dia[1]}${dia[2]}${Number(dia[1]) === diaDeHoje ? '  <<< HOJE' : Number(dia[1]) === diaDeHoje + 1 ? '  <<< AMANHÃ' : ''}`); continue }
+    if (/^Previsão do tempo/i.test(t)) { saida.push(t.slice(0, 160)); continue }
+    if (/^(☀️|🌤️|🌙)/.test(t)) { saida.push(t.replace(/\*/g, '')); continue }
+    if (t.startsWith('🕒') || t.startsWith('💰')) saida.push(`  ${t.replace(/\*/g, '').slice(0, 150)}`)
+  }
+  return saida.join('\n').trim().slice(0, 9000)
+}
+
 // Extrai só o dia atual do roteiro (baseado na data de chegada vs hoje)
 // Reduz tokens de ~2000 para ~400 no contexto do guia
 function extractCurrentDaySection(rawItinerary: string, arrivalDate: string | null): string {
@@ -230,6 +249,9 @@ function currentPeriodInfo(): { label: 'manhã' | 'tarde' | 'noite'; hour: numbe
 // Detecta, via LLM, se a mensagem do cliente indica que ele já visitou algo do roteiro
 // Roda em paralelo (fire-and-forget) — não bloqueia a resposta ao cliente
 async function trackVisitedPlaces(phone: string, userMessage: string): Promise<void> {
+  // Só vale mensagem que fala de algo JÁ FEITO ("já fui", "acabei de sair do", "visitamos"). Antes rodava em
+  // toda mensagem e marcava como visitado até a parada de amanhã ("o que eu tenho amanhã de manhã?").
+  if (!/\bj[aá] (fui|fomos|visitei|visitamos|conheci|conhecemos|passei|passamos|estive|estivemos|fiz|fizemos|almocei|jantei|comi)\b|\bacab(ei|amos) de (sair|visitar|conhecer|almo[cç]ar|jantar|fazer|chegar d)|\b(sa[ií]|sa[ií]mos|voltei|voltamos) (do|da|de)\b|\b(visitei|visitamos|conheci|conhecemos|almocei|almo[cç]amos|jantei|jantamos) (o|a|no|na|em)\b/i.test(userMessage)) return
   const itinerary = await getLatestItinerary(phone)
   if (!itinerary?.rawItinerary) return
 
@@ -260,6 +282,7 @@ async function trackVisitedPlaces(phone: string, userMessage: string): Promise<v
   const local = detect.choices[0]?.message?.content?.trim()
   if (!local || local.toUpperCase() === 'NADA') return
 
+  if ((itinerary.visitedNotes ?? '').toLowerCase().includes(local.toLowerCase())) return // já estava marcado
   const prevNotes = itinerary.visitedNotes ? itinerary.visitedNotes + '\n' : ''
   await updateItinerary(itinerary.id, { visitedNotes: `${prevNotes}- ${local}` })
   log.info('local marcado como visitado', { phone, data: { local } })
@@ -307,6 +330,11 @@ async function buildProfileContext(phone: string, conversation: { name: string |
 
 // Detecta tentativas de prompt injection / jailbreak antes de enviar ao modelo
 const INJECTION_PATTERNS = [
+  /ignor(e|ar)\s+(todas\s+)?(as\s+)?(suas\s+)?(regras|instru[cç][oõ]es)/i,
+  /esque[cç]a\s+(tudo|suas?\s+(regras|instru[cç][oõ]es))/i,
+  /modo\s+(debug|desenvolvedor|depura[cç][aã]o|admin)/i,
+  /(mostr(e|a)|copi(e|a)|repit(a|e)|col(e|a)|imprim(a|e))\b.{0,40}\b(prompt|instru[cç][oõ]es|bloco|contexto|sistema|\[)/i,
+  /sou\s+o\s+(desenvolvedor|programador|dono|administrador)\s+do\s+sistema/i,
   /ignore\s+(all\s+)?(previous|prior|above|your)\s+instructions?/i,
   /forget\s+(everything|all|your\s+instructions?)/i,
   /you\s+are\s+now\s+(a|an|the)\s+/i,
@@ -410,14 +438,17 @@ export async function processMessage(
     const foraSection = !emViagem
       ? `\n\n[HOJE NÃO É DIA DO ROTEIRO: a viagem a ${conversation.destination ?? 'esse destino'} é de ${conversation.arrivalDate ?? '?'} a ${conversation.departureDate ?? '?'} e hoje é ${hojeBR}. NÃO fale como se ele estivesse em ${conversation.destination ?? 'lá'} hoje.${posValida ? '' : ' Você não sabe onde ele está: se ele pedir lugares "perto", "aqui" ou "agora", PERGUNTE em que cidade ou bairro está (ou peça para mandar a localização) antes de indicar qualquer lugar.'}]`
       : ''
-    const itinerarySection = itinerary?.rawItinerary && !(outraCidade && !emViagem)
-      ? `\n\n[ROTEIRO DO CLIENTE — ${emViagem ? 'DIA ATUAL' : 'ROTEIRO MAIS RECENTE (não é de hoje)'}:\n${extractCurrentDaySection(itinerary.rawItinerary, conversation.arrivalDate)}]`
+    const itinerarySection = itinerary?.rawItinerary
+      ? `\n\n[ROTEIRO DO CLIENTE em ${conversation.destination ?? ''} (${emViagem ? 'viagem em andamento; o dia de hoje está marcado' : 'NÃO é de hoje: é o roteiro mais recente'}), TODOS os dias, resumido. Responda sobre qualquer dia com base nele; nunca diga que não tem o roteiro de um dia que está aqui:\n${resumoDoRoteiro(itinerary.rawItinerary, conversation.arrivalDate)}]`
       : ''
+    // G2: prazo da Guia comprada (a pessoa pergunta "até quando vale?")
+    const estadoGuia = await estadoDaGuia(phone, true).catch(() => null)
+    const prazoSection = `\n\n[GUIA SOL: ATIVA${estadoGuia?.ate ? ` até ${estadoGuia.ate.slice(8, 10)}/${estadoGuia.ate.slice(5, 7)}/${estadoGuia.ate.slice(0, 4)} (faltam ${estadoGuia.diasRestantes} dias), com ou sem viagem em andamento` : ', sem data de fim definida'}. Para comprar mais dias (R$ ${config.regras.guiaPrecoDia.toFixed(2).replace('.', ',')} por dia ou R$ ${config.regras.guiaPrecoMes.toFixed(2).replace('.', ',')} por 30 dias, que somam no fim do prazo): ${config.appPublicUrl}/app/guia?renovar=1. NUNCA diga que a Guia não está ativa.]`
     const visitedSection = itinerary?.visitedNotes
       ? `\n\n[JÁ VISITADO/FEITO — não sugira de novo como próximo passo, a menos que o cliente peça para revisar:\n${itinerary.visitedNotes}]`
       : ''
     const { label: periodLabel, hour } = currentPeriodInfo()
-    guiaContext = `\n\n[MODO GUIA ATIVO — hasCompanion: true. Período atual do dia: ${periodLabel} (${hour}h). NUNCA sugira proativamente algo de um período que já passou hoje — só fale sobre isso se o cliente perguntar. Oriente em tempo real com base no roteiro abaixo.]${ondeSection}${foraSection}${itinerarySection}${visitedSection}`
+    guiaContext = `\n\n[MODO GUIA ATIVO — hasCompanion: true. Período atual do dia: ${periodLabel} (${hour}h). NUNCA sugira proativamente algo de um período que já passou hoje — só fale sobre isso se o cliente perguntar. Oriente em tempo real com base no roteiro abaixo.]${prazoSection}${ondeSection}${foraSection}${itinerarySection}${visitedSection}`
 
     trackVisitedPlaces(phone, userMessage).catch(err =>
       log.warn('falha ao rastrear local visitado', { phone, data: { error: (err as Error).message } })
@@ -444,7 +475,7 @@ export async function processMessage(
     tools: solTools,
     tool_choice: 'auto',
     max_completion_tokens: 1000,
-    temperature: 1.2, // um pouco mais criativo para parecer mais humano
+    temperature: 0.9, // 1.2 gerava frases sem sentido ("pronunciando vinca no plural")
     ...reasoningEffortParam,
   })
 
@@ -579,14 +610,19 @@ export async function receberFoto(
 async function handleAtivarGuia(phone: string, channel: Canal = 'whatsapp'): Promise<string> {
   const conversation = await getOrCreateConversation(phone)
 
+  const linkGuia = `${config.appPublicUrl}/app/guia?renovar=1`
+  const precos = `R$ ${config.regras.guiaPrecoDia.toFixed(2).replace('.', ',')} por dia ou R$ ${config.regras.guiaPrecoMes.toFixed(2).replace('.', ',')} por 30 dias`
   if (conversation.hasCompanion) {
-    return responder(phone, channel, 'A Sol Guia já está ativa para você! É só mandar sua localização ou me perguntar qualquer coisa sobre o roteiro. ☀️', 600)
+    const g = await estadoDaGuia(phone, true).catch(() => null)
+    const ate = g?.ate ? ` até ${g.ate.slice(8, 10)}/${g.ate.slice(5, 7)}` : ''
+    return responder(phone, channel, `A Guia Sol já está ativa para você${ate}. ☀️ Se quiser somar mais dias (${precos}), é por aqui:\n${linkGuia}`, 600)
   }
 
   if (!hasTripActive(conversation.departureDate, conversation.hasPaid)) {
+    // Viagem encerrada: a Guia de 30 dias vale com ou sem viagem, e quem já tem roteiro pode assinar de novo
     const msg = conversation.departureDate
-      ? 'Essa viagem já encerrou. Quando você planejar a próxima, posso te acompanhar do primeiro ao último dia!'
-      : 'Para ativar a Sol Guia você precisa ter um roteiro ativo. Vamos montar um primeiro?'
+      ? `Você pode assinar a Guia Sol de novo quando quiser: ${precos}, valendo a partir do pagamento, com ou sem viagem em andamento. É por aqui:\n${linkGuia}`
+      : 'Para ativar a Guia Sol você precisa ter um roteiro. Vamos montar um primeiro?'
     return responder(phone, channel, msg, 600)
   }
 
@@ -628,7 +664,21 @@ async function handlePedirFotoStory(phone: string, channel: Canal = 'whatsapp'):
 // ----------------------------------------------------------------
 async function handleBuscarSugestaoConfiavel(phone: string, args: BuscarSugestaoArgs, channel: Canal = 'whatsapp'): Promise<string> {
   const conversation = await getOrCreateConversation(phone)
-  const contextHint = conversation.destination ? `Cliente está em viagem em ${conversation.destination}.` : undefined
+  const pos = posicoesRecentes.get(phone)
+  const posValida = pos && Date.now() - pos.em < 3 * 3600_000 ? pos : null
+  const hojeBR = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  const emViagem = !!conversation.arrivalDate && !!conversation.departureDate && conversation.arrivalDate <= hojeBR && hojeBR <= conversation.departureDate
+  const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'long', hour: '2-digit', minute: '2-digit' })
+  const orcamento = conversation.touristProfile?.match(/or[cç]amento\s+([^|,]+)/i)?.[1]?.trim()
+  const contextHint = [
+    posValida
+      ? `A pessoa está AGORA em ${posValida.cidade ?? 'local não identificado'}, nas coordenadas ${posValida.lat.toFixed(5)}, ${posValida.lng.toFixed(5)}. "Perto" quer dizer perto DESSAS coordenadas (até uns 2 km), no bairro em que elas ficam, não o centro da cidade.`
+      : emViagem && conversation.destination ? `A pessoa está em viagem em ${conversation.destination}.` : conversation.destination ? `O roteiro mais recente da pessoa é de ${conversation.destination}, mas hoje ela pode estar em outro lugar: use a cidade que a pergunta disser.` : '',
+    `Agora é ${agora} (horário de Brasília): se a pergunta é sobre "agora" ou "aberto", diga para cada lugar se está aberto NESTE momento.`,
+    orcamento ? `Orçamento da pessoa: ${orcamento}. ${/econ/i.test(orcamento) ? 'Indique só lugares baratos (refeição até R$ 45 por pessoa); nada de restaurante caro, rodízio ou gourmet.' : ''}` : '',
+    conversation.groupType ? `Viaja: ${conversation.groupType}.` : '',
+    'Comece direto pela resposta: sem "Oi", sem "Que legal que você está em...".',
+  ].filter(Boolean).join(' ') || undefined
   const result = await searchGroundedAnswer(args.pergunta, contextHint, phone)
   const reply = result || 'Não consegui confirmar isso agora com segurança. Tenta perguntar de um jeito mais específico ou dá uma olhada direto no Google Maps por perto.'
   return responder(phone, channel, reply)
@@ -1018,13 +1068,16 @@ async function gerarEEnviarRoteiro(phone: string, forceDays: number | undefined,
     // Viagem de negócios não passa por aqui: o dia é de trabalho.
     const perfilDaPessoa = `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`
     const postais = ehNegocios ? { texto: textoBase, lista: [] as string[], incluido: null as string | null }
-      : await garantirImperdiveis(textoBase, { destino: dest, datas: datasDaViagem, perfil: perfilDaPessoa, evitar: [...(contexto?.naoGostou ?? []), ...(latestIt?.visitedNotes ? latestIt.visitedNotes.split('\n') : [])], phone, itineraryId: latestIt?.id })
+      : await garantirImperdiveis(textoBase, { destino: dest, datas: datasDaViagem, perfil: perfilDaPessoa, evitar: [...(contexto?.naoGostou ?? []), ...(contexto?.jaFeitos ?? []), ...(latestIt?.visitedNotes ? latestIt.visitedNotes.split('\n') : [])], phone, itineraryId: latestIt?.id })
           .catch(() => ({ texto: textoBase, lista: [] as string[], incluido: null as string | null }))
     const conferido = await log.timed(phone, 'conferencia-google', () =>
-      conferirRoteiro(postais.texto, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem, chegadaMin })
+      conferirRoteiro(postais.texto, { destino: dest, datas: datasDaViagem, centro, perfil: `${touristProfile || 'Turista geral'}, ${groupType || 'solo'}`, phone, itineraryId: latestIt?.id, partida: lerExtras(phone)?.partida ?? null, hospedagem, chegadaMin, saidaMin: departureTime ? minutosDaHora(departureTime) : (transportMode === 'local' || !transportMode ? 22 * 60 : null) })
     )
     // Por último (os trajetos já são os reais): o tempo no local não pode atropelar a próxima parada
-    const tempos = fecharTempos(conferido.texto, cabeNoHorarioEscrito)
+    // Os reparos podem ter mudado horários: o dia volta para a ordem de hora e o período do cabeçalho acompanha
+    const emOrdem = ordenarEAcertarPeriodos(conferido.texto)
+    if (emOrdem.reordenados || emOrdem.periodos) log.info('roteiro reordenado por horário', { phone, step: 'verificacao', data: { dias: emOrdem.reordenados, periodos: emOrdem.periodos } })
+    const tempos = fecharTempos(emOrdem.texto, cabeNoHorarioEscrito)
     if (tempos.ajustes.length) log.info('tempos no local encurtados para caber', { phone, step: 'verificacao', data: { ajustes: tempos.ajustes } })
     // Trava de segurança: os ajustes nunca podem mudar o número de dias. Se mudou (bloco da IA fora do
     // formato), vale o texto de antes da conferência, que tem a estrutura certa.

@@ -64,8 +64,8 @@ Se o roteiro gerado tiver algum problema claro (destino errado, datas trocadas),
 A Sol verifica ativamente segurança de cada local antes de incluir no roteiro. Para destinos internacionais, consulta avisos do governo brasileiro. Nunca inclui locais com alerta ativo de segurança.
 
 ## O que é a Sol Guia?
-É um acompanhamento em tempo real durante a viagem, direto no WhatsApp, por R$ 29,90 (pagamento único, válido pra toda a duração da viagem). Com ela ativa, o cliente pode: mandar a localização e receber orientação sobre o que tem por perto, perguntar se algo ainda está aberto, pedir reorganização do dia por causa do clima, saber de eventos na cidade, pedir sugestão de onde comer perto, mandar fotos para narração e mural de memórias.
+É um acompanhamento em tempo real durante a viagem, no app e no WhatsApp, por R$ 9,90 por dia ou R$ 29,90 por 30 dias (vale até o último dia do prazo comprado, com ou sem viagem em andamento; comprar de novo soma no fim do prazo). Com ela ativa, o cliente pode: mandar a localização e receber orientação sobre o que tem por perto, perguntar se algo ainda está aberto, pedir reorganização do dia por causa do clima, saber de eventos na cidade, pedir sugestão de onde comer perto, mandar fotos para narração e mural de memórias.
 
 ## Como eu ativo a Sol Guia?
-A Sol Guia só pode ser ativada DEPOIS que o cliente já tem um roteiro pago e gerado: não existe ativação antes disso. Se o cliente perguntar como ativar e ainda não tiver um roteiro pago, explique que primeiro é preciso fechar o roteiro base; se ele já tiver, chame a tool ativar_guia para enviar o link de pagamento de R$ 29,90.
+A Guia Sol custa R$ 9,90 por dia ou R$ 29,90 por 30 dias e vale a partir do pagamento, até o último dia do prazo, com ou sem viagem em andamento. Para assinar, a pessoa precisa ter pelo menos um roteiro gerado (qualquer um, inclusive de viagem que já passou). Se o cliente perguntar como assinar, ativar ou renovar, SEMPRE diga os dois preços e chame a tool ativar_guia, que manda o caminho. Se ele ainda não tem nenhum roteiro, explique que primeiro é preciso gerar um.
 `.trim()
