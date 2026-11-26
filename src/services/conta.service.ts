@@ -2,6 +2,7 @@
 // que é dela em todas as tabelas e nos arquivos (fotos, PDFs). Os registros de
 // custo (ApiUsage) ficam sem o telefone, para a contabilidade não quebrar.
 import axios from 'axios'
+import { separarAcessosDaConta } from './acessos.service'
 import prisma, { esquecerConversa } from './database.service'
 import { config } from '../config'
 import { log } from '../logger'
@@ -76,8 +77,12 @@ export async function excluirConta(phone: string): Promise<ResumoExclusao> {
   await prisma.$executeRaw`delete from public.sol_consentimentos where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_cadastro where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_creditos_guia where phone = ${phone}`
-  // Pagamentos ficam como registro financeiro, sem os dados do pedido
-  await prisma.$executeRaw`update public.sol_pagamentos set pedido = null, br_code = null, qr_base64 = null where phone = ${phone}`
+    // Registro de compra: fica 5 anos por obrigação fiscal (valor, data, meio e identificador do pagamento), marcado
+  // como de conta excluída; o conteúdo do pedido (destino, datas) e o código do Pix saem. Entrar de novo com o
+  // mesmo número cria uma conta nova: estes registros não reativam nada.
+  await prisma.$executeRaw`update public.sol_pagamentos set pedido = null, br_code = null, qr_base64 = null, checkout_url = null, conta_excluida_em = coalesce(conta_excluida_em, now()) where phone = ${phone}`
+  // Registros de acesso (IP, data e hora): continuam por 6 meses, sem o telefone
+  await separarAcessosDaConta(phone)
   await prisma.$executeRaw`delete from public.sol_resgates_guia where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_avaliacoes where phone = ${phone}`
   await prisma.$executeRaw`delete from public.sol_avisos where phone = ${phone}`

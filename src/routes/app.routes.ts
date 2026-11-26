@@ -32,6 +32,8 @@ import { criarCompra, gerarPix, gerarCheckout, lerPagamento, conferirNaAbacate, 
 import { confirmarPagamento } from '../services/pagamento-entrega.service'
 import { vincularConvite, resumoIndicacao, resgatarDiasGuia, limparPrazoGuia } from '../services/indicacao.service'
 import prisma from '../services/database.service'
+import { registrarAcesso, referenciaDaConta } from '../services/acessos.service'
+import { excluirConta } from '../services/conta.service'
 import { geocodeDestination } from '../services/weather.service'
 import { salvarFotoPerfil } from '../services/perfil-foto.service'
 
@@ -84,6 +86,7 @@ export function clientAuthMiddleware(req: Request, res: Response, next: NextFunc
       if (pedida && (payload.iat ?? 0) * 1000 < pedida) { res.status(401).json({ error: 'Há um pedido de exclusão desta conta. Entre de novo para cancelar o pedido.', exclusaoPedida: true }); return }
       ;(req as any).clientPhone = phone
       ;(req as any).clientName = payload.name
+      registrarAcesso(phone, req)
       next()
     })
     .catch(err => {
@@ -172,6 +175,7 @@ router.post('/api/app/auth/verificar-otp', limitar('otp-verificar', 30, 600_000)
   const exclusaoCancelada = await cancelarExclusao(phone).catch(() => false)
   const token = jwt.sign({ phone, name: conv.name || '' }, JWT_SECRET, { expiresIn: '30d' })
 
+  registrarAcesso(phone, req, 'login')
   log.info('login app realizado', { phone, step: 'app-auth', data: { porPedido: !!pedido, exclusaoCancelada } })
   res.json({ token, name: conv.name || '', phone, exclusaoCancelada })
 })
@@ -598,6 +602,8 @@ router.get('/api/app/roteiros', clientAuthMiddleware, async (req: Request, res: 
   }
 })
 
+// Datas de nascimento recusadas por idade nas últimas 24 h, por referência anônima da conta (não guarda o telefone)
+const tentativasDeIdade = new Map<string, number[]>()
 // Conta que ainda não pode usar roteiros e compras: sem aceite dos termos, ou menor de 18 anos (RA-CAD).
 // Devolve a mensagem para a pessoa, ou null se está tudo certo.
 const idadeEm = (nasc: string) => { const h = new Date(); const n = new Date(`${nasc}T12:00:00Z`); let i = h.getUTCFullYear() - n.getUTCFullYear(); if (h.getUTCMonth() < n.getUTCMonth() || (h.getUTCMonth() === n.getUTCMonth() && h.getUTCDate() < n.getUTCDate())) i--; return i }
@@ -761,6 +767,23 @@ router.post('/api/app/cadastro', clientAuthMiddleware, async (req: Request, res:
   const { nome, nascimento, concluir, gostos, viagem, lugaresDesejados, convite } = req.body ?? {}
   if (nascimento !== undefined && (typeof nascimento !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(nascimento) || nascimento > new Date().toISOString().slice(0, 10) || nascimento < '1900-01-01')) {
     res.status(400).json({ error: 'Data de nascimento inválida' }); return
+  }
+  // Menor de 13 anos (LGPD art. 14, TODO-469): o cadastro não conclui, a conta é apagada na hora e nada dela fica
+  // guardado. Para não virar tentativa e erro com outras datas: no máximo 3 datas por número em 24 horas.
+  if (nascimento !== undefined && !(config.revisor.phone && phone === config.revisor.phone)) {
+    const ref = referenciaDaConta(phone)
+    const agora = Date.now()
+    const anteriores = (tentativasDeIdade.get(ref) ?? []).filter(t => agora - t < 24 * 3600_000)
+    if (anteriores.length >= 3) { res.status(429).json({ error: 'Muitas tentativas com datas diferentes. Tente de novo amanhã ou fale com o suporte da Sol.', bloqueioIdade: true }); return }
+    if (idadeEm(nascimento) < 13) {
+      tentativasDeIdade.set(ref, [...anteriores, agora])
+      await excluirConta(phone).catch(err => log.error('erro ao apagar conta de menor de 13 anos', err, { step: 'app-cadastro' }))
+      log.warn('cadastro recusado: menor de 13 anos (conta apagada, nada guardado)', { step: 'app-cadastro' })
+      res.status(403).json({ error: 'Você ainda não pode usar a Sol. Quando puder, a gente te espera por aqui.', bloqueioIdade: true })
+      return
+    }
+    // Trocar a data depois de uma recusa também conta como tentativa
+    if (anteriores.length) tentativasDeIdade.set(ref, [...anteriores, agora])
   }
   // Quem informou uma data de menor de idade não troca a data sozinho (a tela restrita deixava refazer o
   // cadastro com outro ano e virar conta completa): a correção passa pelo suporte

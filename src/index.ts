@@ -11,6 +11,7 @@ import prisma from './services/database.service'
 import { startDailyJobs, startAvisosDaGuia } from './jobs/daily'
 import { manterGuiasNoPrazo } from './services/guia-prazo.service'
 import { carregarExclusoesPendentes, executarExclusoesVencidas } from './services/exclusao.service'
+import { limparRegistrosVencidos } from './services/acessos.service'
 import { waitForActiveOperations, operacoesAtivas } from './shutdown'
 import adminRoutes from './routes/admin.routes'
 import { definirDestinoDosLogs } from './logger'
@@ -139,6 +140,11 @@ async function bootstrap() {
     const exclusoes = () => executarExclusoesVencidas().catch(err => log.error('erro na rotina de exclusão de contas', err, { step: 'excluir-conta' }))
     setInterval(exclusoes, 3600_000).unref()
     if (process.env.MODO_CARGA !== '1') setTimeout(exclusoes, 60_000).unref()
+
+    // Registros com prazo legal: acesso (6 meses) e compra (5 anos). Limpeza uma vez por dia.
+    const limpeza = () => limparRegistrosVencidos().catch(err => log.error('erro na limpeza de registros legais', err, { step: 'acessos' }))
+    setInterval(limpeza, 24 * 3600_000).unref()
+    if (process.env.MODO_CARGA !== '1') setTimeout(limpeza, 120_000).unref()
 
     if (!config.meta.appSecret) log.warn('META_APP_SECRET não definido: a assinatura do webhook do WhatsApp não é conferida', { step: 'bootstrap' })
     if (!config.abacatePay.webhookSecret) log.warn('ABACATEPAY_WEBHOOK_SECRET vazio: webhooks de pagamento recusados', { step: 'bootstrap' })
